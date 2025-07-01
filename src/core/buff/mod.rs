@@ -12,6 +12,8 @@ use super::{
 pub enum BuffType {
     Abilities,
 
+    AttackSettlement,
+
     Revival,
 }
 
@@ -27,7 +29,7 @@ pub fn get_event_priorities(event_type: EventType) -> &'static [BuffType] {
 
         // Action events
         EventType::BeforePlayerAttack => &[],
-        EventType::PlayerAttack => &[],
+        EventType::PlayerAttack => &[BuffType::AttackSettlement],
         EventType::AfterPlayerAttack => &[],
         EventType::BeforePlayerDeath => &[BuffType::Revival],
         EventType::AfterPlayerDeath => &[],
@@ -38,7 +40,7 @@ pub trait Buff: std::fmt::Debug {
     fn buff_type(&self) -> BuffType;
     fn on_event(
         &self,
-        event: Event,
+        event: &mut Event,
         world: &World,
         commands: &mut Commands,
         buff_id: super::BuffId,

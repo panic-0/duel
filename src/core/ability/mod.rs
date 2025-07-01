@@ -6,9 +6,8 @@ use super::{
     command::Commands,
     event::Event,
     world::World,
-    PlayerId,
+    BuffId, PlayerId,
 };
-use colored::Colorize;
 
 pub trait Ability: std::fmt::Debug {
     fn apply(&self, source_id: PlayerId, world: &World, commands: &mut Commands);
@@ -36,12 +35,12 @@ impl Buff for Abilities {
 
     fn on_event(
         &self,
-        event: Event,
+        event: &mut Event,
         world: &World,
         commands: &mut Commands,
         _buff_id: super::BuffId,
     ) {
-        match event {
+        match *event {
             Event::Turn {
                 round: _,
                 player_id,

@@ -32,10 +32,12 @@ pub enum Event {
     PlayerAttack {
         source_id: PlayerId,
         target_id: PlayerId,
+        damage: u64,
     },
     AfterPlayerAttack {
         source_id: PlayerId,
         target_id: PlayerId,
+        damage: u64,
     },
 
     BeforePlayerDeath(PlayerId),

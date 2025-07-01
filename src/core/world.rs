@@ -132,13 +132,13 @@ impl World {
         self.buffs.get_mut(&id)
     }
 
-    pub fn apply_event(&mut self, event: Event) {
+    pub fn apply_event(&mut self, event: &mut Event) {
         let mut commands = Commands::default();
 
         if let Some(registrations) = self.event_registry.get(&event.event_type()) {
             for registration in registrations {
                 if let Some(buff) = self.buffs.get(&registration.buff_id) {
-                    buff.on_event(event.clone(), self, &mut commands, registration.buff_id);
+                    buff.on_event(event, self, &mut commands, registration.buff_id);
                 }
             }
         }
@@ -174,7 +174,7 @@ impl World {
     pub fn run(mut self) {
         let mut state = Event::DuelStart;
         loop {
-            self.apply_event(state.clone());
+            self.apply_event(&mut state); // TODO: 状态机
             if self.is_end() {
                 break;
             }

@@ -26,12 +26,12 @@ impl Buff for Revival {
 
     fn on_event(
         &self,
-        event: Event,
+        event: &mut Event,
         world: &World,
         commands: &mut Commands,
         buff_id: super::super::BuffId,
     ) {
-        match event {
+        match *event {
             Event::BeforePlayerDeath(player_id) if player_id == self.source_id => {
                 if let Some(player) = world.get_player(self.source_id) {
                     println!("{} 复活了！", player.name().blue());
