@@ -133,6 +133,9 @@ impl World {
     }
 
     pub fn apply_event(&mut self, event: &mut Event) {
+        if self.is_end() {
+            return;
+        }
         let mut commands = Commands::default();
 
         if let Some(registrations) = self.event_registry.get(&event.event_type()) {
@@ -172,34 +175,8 @@ impl World {
     }
 
     pub fn run(mut self) {
-        let mut state = Event::DuelStart;
-        loop {
-            self.apply_event(&mut state); // TODO: 状态机
-            if self.is_end() {
-                break;
-            }
-            state = match state {
-                Event::DuelStart => Event::RoundStart { round: 1 },
-                Event::RoundStart { round } => Event::BeforeTurn {
-                    round,
-                    player_id: *self.players.keys().next().unwrap(),
-                },
-                Event::BeforeTurn { round, player_id } => Event::Turn { round, player_id },
-                Event::Turn { round, player_id } => Event::AfterTurn { round, player_id },
-                Event::AfterTurn { round, player_id } => {
-                    if let Some(next_player_id) = self.get_next_player_not_around(player_id) {
-                        Event::BeforeTurn {
-                            round,
-                            player_id: next_player_id,
-                        }
-                    } else {
-                        Event::RoundEnd { round }
-                    }
-                }
-                Event::RoundEnd { round } => Event::RoundStart { round: round + 1 },
-                _ => break, // 非状态事件不应该在这里处理
-            }
-        }
+        self.add_buff(Box::new(super::buff::StateMachine));
+        self.apply_event(&mut Event::DuelStart);
     }
 }
 

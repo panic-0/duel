@@ -4,6 +4,9 @@ pub use revival::Revival;
 pub mod damage_reduction;
 pub use damage_reduction::DamageReduction;
 
+pub mod state_machine;
+pub use state_machine::StateMachine;
+
 use super::{
     command::Commands,
     event::{Event, EventType},
@@ -13,6 +16,10 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BuffType {
+    // World Buffs
+    StateMachine,
+
+    // Player Buffs
     Abilities,
 
     AttackSettlement,
@@ -23,13 +30,13 @@ pub enum BuffType {
 
 pub fn get_event_priorities(event_type: EventType) -> &'static [BuffType] {
     match event_type {
-        // State events
-        EventType::DuelStart => &[],
-        EventType::RoundStart => &[],
-        EventType::BeforeTurn => &[],
-        EventType::Turn => &[BuffType::Abilities],
-        EventType::AfterTurn => &[],
-        EventType::RoundEnd => &[],
+        // State events - 状态机在最后处理，用于生成下一个状态
+        EventType::DuelStart => &[BuffType::StateMachine],
+        EventType::RoundStart => &[BuffType::StateMachine],
+        EventType::BeforeTurn => &[BuffType::StateMachine],
+        EventType::Turn => &[BuffType::Abilities, BuffType::StateMachine],
+        EventType::AfterTurn => &[BuffType::StateMachine],
+        EventType::RoundEnd => &[BuffType::StateMachine],
 
         // Action events
         EventType::BeforePlayerAttack => &[],
