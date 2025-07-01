@@ -1,6 +1,9 @@
 pub mod revival;
 pub use revival::Revival;
 
+pub mod damage_reduction;
+pub use damage_reduction::DamageReduction;
+
 use super::{
     command::Commands,
     event::{Event, EventType},
@@ -14,6 +17,7 @@ pub enum BuffType {
 
     AttackSettlement,
 
+    DamageReduction,
     Revival,
 }
 
@@ -29,7 +33,7 @@ pub fn get_event_priorities(event_type: EventType) -> &'static [BuffType] {
 
         // Action events
         EventType::BeforePlayerAttack => &[],
-        EventType::PlayerAttack => &[BuffType::AttackSettlement],
+        EventType::PlayerAttack => &[BuffType::DamageReduction, BuffType::AttackSettlement],
         EventType::AfterPlayerAttack => &[],
         EventType::BeforePlayerDeath => &[BuffType::Revival],
         EventType::AfterPlayerDeath => &[],

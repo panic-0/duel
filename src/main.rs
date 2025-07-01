@@ -44,13 +44,14 @@ impl Default for GameBuilder {
 fn main() {
     let builder = GameBuilder::new();
     let (builder, player1_id) = builder.add_player("Player1", 15, 10);
-    let (builder, player2_id) = builder.add_player("Player2", 35, 8);
+    let (builder, player2_id) = builder.add_player("Player2", 28, 8);
     let mut world = builder
         .give_basic_abilities(player1_id)
         .give_basic_abilities(player2_id)
         .build();
 
     world.add_buff(Box::new(core::buff::Revival::new(player1_id)));
+    world.add_buff(Box::new(core::buff::DamageReduction::new(player2_id, 0.2)));
 
     world.run();
 }
