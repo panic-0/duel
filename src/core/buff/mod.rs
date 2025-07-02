@@ -22,7 +22,7 @@ pub enum BuffType {
     // Player Buffs
     Abilities,
 
-    AttackSettlement,
+    Attack,
 
     DamageReduction,
     Revival,
@@ -39,8 +39,8 @@ pub fn get_event_priorities(event_type: EventType) -> &'static [BuffType] {
         EventType::RoundEnd => &[BuffType::StateMachine],
 
         // Action events
-        EventType::BeforePlayerAttack => &[],
-        EventType::PlayerAttack => &[BuffType::DamageReduction, BuffType::AttackSettlement],
+        EventType::BeforePlayerAttack => &[BuffType::Attack],
+        EventType::PlayerAttack => &[BuffType::DamageReduction, BuffType::Attack],
         EventType::AfterPlayerAttack => &[],
         EventType::BeforePlayerDeath => &[BuffType::Revival],
         EventType::AfterPlayerDeath => &[],

@@ -13,32 +13,50 @@ impl Attack {
 }
 
 #[derive(Debug)]
-struct AttackSettlementBuff {
+struct AttackBuff {
     source_id: PlayerId,
+    target_id: PlayerId,
 }
 
-impl Buff for AttackSettlementBuff {
+impl Buff for AttackBuff {
     fn buff_type(&self) -> BuffType {
-        BuffType::AttackSettlement
+        BuffType::Attack
     }
 
     fn on_event(&self, event: &mut Event, world: &World, commands: &mut Commands, buff_id: BuffId) {
-        if let Event::PlayerAttack {
-            source_id,
-            target_id,
-            damage,
-        } = *event
-        {
-            if source_id == self.source_id {
-                let Some(source) = world.get_player(source_id) else {
+        let Some(source) = world.get_player(self.source_id) else {
+            return;
+        };
+        let Some(target) = world.get_player(self.target_id) else {
+            return;
+        };
+        match *event {
+            Event::BeforePlayerAttack {
+                source_id,
+                target_id,
+            } => {
+                if source_id != self.source_id || target_id != self.target_id {
                     return;
-                };
-                let Some(target) = world.get_player(target_id) else {
+                }
+
+                commands.push(ApplyEvent {
+                    event: Event::PlayerAttack {
+                        source_id,
+                        target_id,
+                        damage: source.attack(),
+                    },
+                });
+            }
+            Event::PlayerAttack {
+                source_id,
+                target_id,
+                damage,
+            } => {
+                if source_id != self.source_id || target_id != self.target_id {
                     return;
-                };
+                }
 
                 commands.push(RemoveBuff { id: buff_id });
-
                 println!(
                     "{} 对 {} 进行了普通攻击",
                     source.name().blue(),
@@ -54,33 +72,24 @@ impl Buff for AttackSettlementBuff {
                     },
                 });
             }
+            _ => {}
         }
     }
 }
 
 impl Ability for Attack {
     fn apply(&self, source_id: PlayerId, world: &World, commands: &mut Commands) {
-        let Some(source) = world.get_player(source_id) else {
-            return;
-        };
-
         if let Some(target_id) = self.get_target(source_id, world) {
+            commands.push(AddBuff {
+                buff: Box::new(AttackBuff {
+                    source_id,
+                    target_id,
+                }),
+            });
             commands.push(ApplyEvent {
                 event: Event::BeforePlayerAttack {
                     source_id,
                     target_id,
-                },
-            });
-
-            commands.push(AddBuff {
-                buff: Box::new(AttackSettlementBuff { source_id }),
-            });
-
-            commands.push(ApplyEvent {
-                event: Event::PlayerAttack {
-                    source_id,
-                    target_id,
-                    damage: source.attack(),
                 },
             });
         }
