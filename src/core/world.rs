@@ -2,13 +2,14 @@ use super::{
     buff::{Buff, Priority},
     command::Commands,
     event::{Event, EventType},
+    log::{LogEntry, Logger},
     player::Player,
     BuffId, PlayerId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// 单场对局的最大回合数，防止无限对局挂起
-const MAX_ROUNDS: u32 = 10000;
+pub const MAX_ROUNDS: u32 = 10000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EventRegistration {
@@ -38,6 +39,7 @@ pub struct World {
     buff_id_counter: BuffId,
     event_registry: HashMap<EventType, BTreeSet<EventRegistration>>,
     event_queue: VecDeque<Event>,
+    logger: Logger,
     end: bool,
 }
 
@@ -50,6 +52,7 @@ impl World {
             buff_id_counter: 0,
             event_registry: HashMap::new(),
             event_queue: VecDeque::new(),
+            logger: Logger::default(),
             end: false,
         }
     }
@@ -83,7 +86,10 @@ impl World {
 
         for (event_type, priority) in buff.subscriptions() {
             let registrations = self.event_registry.entry(event_type).or_default();
-            registrations.insert(EventRegistration { priority, buff_id: id });
+            registrations.insert(EventRegistration {
+                priority,
+                buff_id: id,
+            });
         }
 
         self.buffs.insert(id, buff);
@@ -113,6 +119,14 @@ impl World {
         self.buffs.get_mut(&id)
     }
 
+    pub fn set_logger(&mut self, logger: Logger) {
+        self.logger = logger;
+    }
+
+    pub fn log(&self, entry: LogEntry) {
+        self.logger.emit(self, &entry);
+    }
+
     pub fn queue_event(&mut self, event: Event) {
         self.event_queue.push_back(event);
     }
@@ -136,8 +150,51 @@ impl World {
             .into_iter()
             .for_each(|command| command.apply(self));
 
+        self.advance_flow(event);
+
         if self.players.len() <= 1 {
             self.end = true;
+        }
+    }
+
+    /// 引擎内置的全局流程推进：在每个事件处理完毕后生成下一个流程事件。
+    /// 相当于原先的 StateMachine buff，但不再占用 buff 列表。
+    fn advance_flow(&mut self, event: &mut Event) {
+        let next_event = match event {
+            Event::DuelStart => Some(Event::RoundStart { round: 1 }),
+            Event::RoundStart { round } => {
+                self.get_players()
+                    .keys()
+                    .next()
+                    .map(|first_player_id| Event::BeforeTurn {
+                        round: *round,
+                        player_id: *first_player_id,
+                    })
+            }
+            Event::BeforeTurn { round, player_id } => Some(Event::Turn {
+                round: *round,
+                player_id: *player_id,
+            }),
+            Event::Turn { round, player_id } => Some(Event::AfterTurn {
+                round: *round,
+                player_id: *player_id,
+            }),
+            Event::AfterTurn { round, player_id } => {
+                if let Some(next_player_id) = self.get_next_player_not_around(*player_id) {
+                    Some(Event::BeforeTurn {
+                        round: *round,
+                        player_id: next_player_id,
+                    })
+                } else {
+                    Some(Event::RoundEnd { round: *round })
+                }
+            }
+            Event::RoundEnd { round } => Some(Event::RoundStart { round: *round + 1 }),
+            _ => None,
+        };
+
+        if let Some(next_event) = next_event {
+            self.queue_event(next_event);
         }
     }
 
@@ -159,17 +216,21 @@ impl World {
             .map(|(id, _)| *id)
     }
 
-    pub fn run(mut self) {
-        self.add_buff(Box::new(super::buff::StateMachine));
+    /// 完整跑一局：播下 DuelStart 后泵事件队列直到结束
+    pub fn run(&mut self) {
         self.apply_event(&mut Event::DuelStart);
+        self.pump();
+    }
 
+    /// 泵事件队列直到结束或排空，可单独调用来分步驱动对局
+    pub fn pump(&mut self) {
         while let Some(mut event) = self.event_queue.pop_front() {
             if self.is_end() {
                 break;
             }
             if let Event::RoundStart { round } = event {
                 if round > MAX_ROUNDS {
-                    println!("已达到最大回合数（{}），平局", MAX_ROUNDS);
+                    self.log(LogEntry::Draw);
                     self.end = true;
                     break;
                 }

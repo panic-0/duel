@@ -1,8 +1,7 @@
-use colored::Colorize;
-
 use super::super::{
     command::{Commands, RemoveBuff},
     event::{Event, EventType},
+    log::LogEntry,
     modifier::HpModifier,
     world::World,
     PlayerId,
@@ -35,7 +34,9 @@ impl Buff for Revival {
         match *event {
             Event::BeforePlayerDeath(player_id) if player_id == self.source_id => {
                 if let Some(player) = world.get_player(self.source_id) {
-                    println!("{} 复活了！", player.name().blue());
+                    world.log(LogEntry::Revival {
+                        player_id: self.source_id,
+                    });
                     commands.push(RemoveBuff { id: buff_id });
                     commands.push(HpModifier::heal(self.source_id, player.max_hp() / 2));
                 }

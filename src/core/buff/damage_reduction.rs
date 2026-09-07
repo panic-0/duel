@@ -1,8 +1,5 @@
-use colored::Colorize;
-
-use super::super::{command::Commands, event::Event, world::World};
-use super::{Buff, Priority, EventType};
-use super::super::PlayerId;
+use super::super::{command::Commands, event::Event, log::LogEntry, world::World, PlayerId};
+use super::{Buff, EventType, Priority};
 
 #[derive(Debug)]
 pub struct DamageReduction {
@@ -41,14 +38,11 @@ impl Buff for DamageReduction {
                 let reduced_damage = (original_damage as f64 * (1.0 - self.reduction_ratio)) as u64;
                 *damage = reduced_damage;
 
-                if let Some(player) = world.get_player(self.target_id) {
-                    println!(
-                        "{} 的减伤效果触发！伤害从 {} 降低到 {}",
-                        player.name().blue(),
-                        original_damage.to_string().bright_red(),
-                        reduced_damage.to_string().yellow()
-                    );
-                }
+                world.log(LogEntry::DamageReduced {
+                    target_id: self.target_id,
+                    original: original_damage,
+                    reduced: reduced_damage,
+                });
             }
             _ => {}
         }

@@ -1,7 +1,7 @@
 use super::super::command::{AddBuff, ApplyEvent, RemoveBuff};
+use super::super::log::LogEntry;
 use super::super::modifier::HpModifier;
 use super::*;
-use colored::Colorize;
 
 #[derive(Debug)]
 pub struct Attack;
@@ -27,12 +27,6 @@ impl Buff for AttackBuff {
     }
 
     fn on_event(&self, event: &mut Event, world: &World, commands: &mut Commands, buff_id: BuffId) {
-        let Some(source) = world.get_player(self.source_id) else {
-            return;
-        };
-        let Some(target) = world.get_player(self.target_id) else {
-            return;
-        };
         match *event {
             Event::BeforePlayerAttack {
                 source_id,
@@ -41,6 +35,9 @@ impl Buff for AttackBuff {
                 if source_id != self.source_id || target_id != self.target_id {
                     return;
                 }
+                let Some(source) = world.get_player(self.source_id) else {
+                    return;
+                };
 
                 commands.push(ApplyEvent {
                     event: Event::PlayerAttack {
@@ -60,11 +57,10 @@ impl Buff for AttackBuff {
                 }
 
                 commands.push(RemoveBuff { id: buff_id });
-                println!(
-                    "{} 对 {} 进行了普通攻击",
-                    source.name().blue(),
-                    target.name().blue()
-                );
+                world.log(LogEntry::Attack {
+                    source_id,
+                    target_id,
+                });
                 commands.push(HpModifier::damage(target_id, damage));
 
                 commands.push(ApplyEvent {

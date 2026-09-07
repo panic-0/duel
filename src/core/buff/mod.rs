@@ -4,9 +4,6 @@ pub use revival::Revival;
 pub mod damage_reduction;
 pub use damage_reduction::DamageReduction;
 
-pub mod state_machine;
-pub use state_machine::StateMachine;
-
 use super::{
     command::Commands,
     event::{Event, EventType},
@@ -23,7 +20,7 @@ pub enum Priority {
     Default,
     /// 结算（消费已被修改过的事件参数）
     Resolve,
-    /// 全局状态推进，始终最后触发
+    /// 兜底阶段，晚于结算触发（引擎的流程推进在所有 buff 之后进行）
     StateMachine,
 }
 
