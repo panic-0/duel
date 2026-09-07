@@ -161,10 +161,7 @@ impl World {
 
         // 结束条件在分发前检查，命中的事件不再进入监听者
         if let Some(result) = self.check_end_conditions(event) {
-            if matches!(result, GameResult::Draw) {
-                self.log(LogEntry::Draw);
-            }
-            self.end = true;
+            self.apply_end(result);
             return;
         }
 
@@ -183,14 +180,42 @@ impl World {
             .into_iter()
             .for_each(|command| command.apply(self));
 
+        self.resolve_death(event);
+
         let next_events = self.flow.advance(&self.state, event);
         self.event_queue.extend(next_events);
+    }
+
+    /// 死亡结算：`BeforePlayerDeath` 的监听者（如复活）执行完后血量仍为 0，
+    /// 死亡坐实——记日志、移除玩家并入队 `AfterPlayerDeath` 终局通知。
+    /// 移除必须在此处完成：若延迟到终局通知之后，中间被处理的流程事件
+    /// 可能为已死玩家排出行动回合。
+    fn resolve_death(&mut self, event: &Event) {
+        if let Event::BeforePlayerDeath(id) = *event {
+            if self.state.get_player(id).is_some_and(|p| p.hp() == 0) {
+                self.log(LogEntry::Death { player_id: id });
+                self.state.remove_player(id);
+                self.queue_event(Event::AfterPlayerDeath(id));
+
+                // 移除玩家可能直接满足结束条件（如剩最后一人生还）
+                if let Some(result) = self.check_end_conditions(event) {
+                    self.apply_end(result);
+                }
+            }
+        }
     }
 
     fn check_end_conditions(&mut self, event: &Event) -> Option<GameResult> {
         self.end_conditions
             .iter_mut()
             .find_map(|condition| condition.check(&self.state, event))
+    }
+
+    fn apply_end(&mut self, result: GameResult) {
+        if matches!(result, GameResult::Draw) {
+            self.log(LogEntry::Draw);
+        }
+        self.end = true;
     }
 
     pub fn is_end(&self) -> bool {

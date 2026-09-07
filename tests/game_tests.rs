@@ -11,7 +11,7 @@ use duel::core::{
     player::Player,
     state::GameState,
     world::World,
-    BuffId,
+    BuffId, PlayerId,
 };
 
 /// 记录自己被触发顺序的假 buff，用于测试事件分发
@@ -267,4 +267,52 @@ fn custom_round_limit_ends_game_early() {
     assert!(world.is_end(), "应因自定义回合上限提前结束");
     assert!(world.get_player(0).is_some(), "2 回合内双方都应存活");
     assert!(world.get_player(1).is_some());
+}
+
+/// 记录所有 Turn 事件行动者的探针 buff
+#[derive(Debug)]
+struct TurnSpy {
+    turns: Rc<RefCell<Vec<PlayerId>>>,
+}
+
+impl Buff for TurnSpy {
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        vec![(EventType::Turn, Priority::Final)]
+    }
+
+    fn on_event(
+        &mut self,
+        event: &mut Event,
+        _world: &GameState,
+        _commands: &mut Commands,
+        _buff_id: BuffId,
+    ) {
+        if let Event::Turn { player_id, .. } = *event {
+            self.turns.borrow_mut().push(player_id);
+        }
+    }
+}
+
+#[test]
+fn dead_player_never_gets_another_turn() {
+    let turns = Rc::new(RefCell::new(Vec::new()));
+    let mut world = World::new();
+    let a = world.add_player(Player::new("A".to_string(), 50, 5));
+    let b = world.add_player(Player::new("B".to_string(), 5, 1));
+    let c = world.add_player(Player::new("C".to_string(), 50, 5));
+    world.add_buff(Box::new(TurnSpy {
+        turns: turns.clone(),
+    }));
+    for id in [a, b, c] {
+        world.add_buff(Box::new(Abilities::new(id, vec![Box::new(Attack)])));
+    }
+
+    world.run();
+
+    assert!(world.is_end());
+    assert_eq!(
+        turns.borrow().iter().filter(|&&id| id == b).count(),
+        1,
+        "B 只应在死亡当轮行动一次，死亡后不得再获得回合"
+    );
 }
