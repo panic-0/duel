@@ -1,13 +1,14 @@
 use super::super::command::{AddBuff, ApplyEvent, RemoveBuff};
 use super::super::log::LogEntry;
 use super::super::modifier::HpModifier;
+use super::super::state::GameState;
 use super::*;
 
 #[derive(Debug)]
 pub struct Attack;
 
 impl Attack {
-    fn get_target(&self, source_id: PlayerId, world: &World) -> Option<PlayerId> {
+    fn get_target(&self, source_id: PlayerId, world: &GameState) -> Option<PlayerId> {
         world.get_next_player_around(source_id)
     }
 }
@@ -26,7 +27,13 @@ impl Buff for AttackBuff {
         ]
     }
 
-    fn on_event(&self, event: &mut Event, world: &World, commands: &mut Commands, buff_id: BuffId) {
+    fn on_event(
+        &mut self,
+        event: &mut Event,
+        world: &GameState,
+        commands: &mut Commands,
+        buff_id: BuffId,
+    ) {
         match *event {
             Event::BeforePlayerAttack {
                 source_id,
@@ -77,7 +84,7 @@ impl Buff for AttackBuff {
 }
 
 impl Ability for Attack {
-    fn apply(&self, source_id: PlayerId, world: &World, commands: &mut Commands) {
+    fn apply(&self, source_id: PlayerId, world: &GameState, commands: &mut Commands) {
         if let Some(target_id) = self.get_target(source_id, world) {
             commands.push(AddBuff {
                 buff: Box::new(AttackBuff {

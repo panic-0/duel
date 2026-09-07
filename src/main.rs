@@ -2,9 +2,11 @@ pub mod core;
 
 use core::{
     ability::{Abilities, Attack},
+    flow::MAX_ROUNDS,
     log::{LogEntry, Logger},
     player::Player,
-    world::{World, MAX_ROUNDS},
+    state::GameState,
+    world::World,
     PlayerId,
 };
 
@@ -36,7 +38,7 @@ impl Default for GameBuilder {
     }
 }
 
-fn print_log(world: &World, entry: &LogEntry) {
+fn print_log(world: &GameState, entry: &LogEntry) {
     use colored::Colorize;
     let name = |id: PlayerId| {
         world

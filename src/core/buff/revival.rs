@@ -3,8 +3,8 @@ use super::super::{
     event::{Event, EventType},
     log::LogEntry,
     modifier::HpModifier,
-    world::World,
-    PlayerId,
+    state::GameState,
+    BuffId, PlayerId,
 };
 use super::{Buff, Priority};
 
@@ -25,11 +25,11 @@ impl Buff for Revival {
     }
 
     fn on_event(
-        &self,
+        &mut self,
         event: &mut Event,
-        world: &World,
+        world: &GameState,
         commands: &mut Commands,
-        buff_id: super::super::BuffId,
+        buff_id: BuffId,
     ) {
         match *event {
             Event::BeforePlayerDeath(player_id) if player_id == self.source_id => {

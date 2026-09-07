@@ -2,14 +2,16 @@ use super::{
     buff::{Buff, Priority},
     command::Commands,
     event::{Event, EventType},
+    flow::{
+        EndCondition, FlowDriver, GameResult, LastManStanding, RoundLimit, RoundRobinFlow,
+        MAX_ROUNDS,
+    },
     log::{LogEntry, Logger},
     player::Player,
+    state::GameState,
     BuffId, PlayerId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-
-/// 单场对局的最大回合数，防止无限对局挂起
-pub const MAX_ROUNDS: u32 = 10000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EventRegistration {
@@ -31,53 +33,74 @@ impl std::cmp::Ord for EventRegistration {
     }
 }
 
+/// 引擎：负责事件泵、按订阅分发与命令执行。
+/// 游戏状态在 [`GameState`]，回合流程与结束条件由可插拔的
+/// [`FlowDriver`] / [`EndCondition`] 决定。
 #[derive(Debug)]
 pub struct World {
-    players: BTreeMap<PlayerId, Player>,
-    player_id_counter: PlayerId,
+    state: GameState,
     buffs: BTreeMap<BuffId, Box<dyn Buff>>,
     buff_id_counter: BuffId,
     event_registry: HashMap<EventType, BTreeSet<EventRegistration>>,
     event_queue: VecDeque<Event>,
-    logger: Logger,
+    flow: Box<dyn FlowDriver>,
+    end_conditions: Vec<Box<dyn EndCondition>>,
     end: bool,
 }
 
 impl World {
     pub fn new() -> Self {
         World {
-            players: BTreeMap::new(),
-            player_id_counter: 0,
+            state: GameState::new(),
             buffs: BTreeMap::new(),
             buff_id_counter: 0,
             event_registry: HashMap::new(),
             event_queue: VecDeque::new(),
-            logger: Logger::default(),
+            flow: Box::new(RoundRobinFlow),
+            end_conditions: vec![
+                Box::new(RoundLimit::new(MAX_ROUNDS)),
+                Box::new(LastManStanding::default()),
+            ],
             end: false,
         }
     }
 
+    /// 替换流程驱动，决定对局的回合/轮转结构
+    pub fn set_flow(&mut self, flow: Box<dyn FlowDriver>) {
+        self.flow = flow;
+    }
+
+    /// 追加结束条件（默认已装配回合上限与最后一人生还）
+    pub fn add_end_condition(&mut self, condition: Box<dyn EndCondition>) {
+        self.end_conditions.push(condition);
+    }
+
     pub fn add_player(&mut self, player: Player) -> PlayerId {
-        let id = self.player_id_counter;
-        self.player_id_counter += 1;
-        self.players.insert(id, player);
-        id
+        self.state.add_player(player)
     }
 
     pub fn remove_player(&mut self, id: PlayerId) -> Option<Player> {
-        self.players.remove(&id)
+        self.state.remove_player(id)
     }
 
     pub fn get_players(&self) -> &BTreeMap<PlayerId, Player> {
-        &self.players
+        self.state.get_players()
     }
 
     pub fn get_player(&self, id: PlayerId) -> Option<&Player> {
-        self.players.get(&id)
+        self.state.get_player(id)
     }
 
     pub fn get_player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
-        self.players.get_mut(&id)
+        self.state.get_player_mut(id)
+    }
+
+    pub fn get_next_player_not_around(&self, id: PlayerId) -> Option<PlayerId> {
+        self.state.get_next_player_not_around(id)
+    }
+
+    pub fn get_next_player_around(&self, id: PlayerId) -> Option<PlayerId> {
+        self.state.get_next_player_around(id)
     }
 
     pub fn add_buff(&mut self, buff: Box<dyn Buff>) -> BuffId {
@@ -120,11 +143,11 @@ impl World {
     }
 
     pub fn set_logger(&mut self, logger: Logger) {
-        self.logger = logger;
+        self.state.set_logger(logger);
     }
 
     pub fn log(&self, entry: LogEntry) {
-        self.logger.emit(self, &entry);
+        self.state.log(entry);
     }
 
     pub fn queue_event(&mut self, event: Event) {
@@ -135,12 +158,22 @@ impl World {
         if self.is_end() {
             return;
         }
+
+        // 结束条件在分发前检查，命中的事件不再进入监听者
+        if let Some(result) = self.check_end_conditions(event) {
+            if matches!(result, GameResult::Draw) {
+                self.log(LogEntry::Draw);
+            }
+            self.end = true;
+            return;
+        }
+
         let mut commands = Commands::default();
 
         if let Some(registrations) = self.event_registry.get(&event.event_type()) {
             for registration in registrations {
-                if let Some(buff) = self.buffs.get(&registration.buff_id) {
-                    buff.on_event(event, self, &mut commands, registration.buff_id);
+                if let Some(buff) = self.buffs.get_mut(&registration.buff_id) {
+                    buff.on_event(event, &self.state, &mut commands, registration.buff_id);
                 }
             }
         }
@@ -150,52 +183,14 @@ impl World {
             .into_iter()
             .for_each(|command| command.apply(self));
 
-        self.advance_flow(event);
-
-        if self.players.len() <= 1 {
-            self.end = true;
-        }
+        let next_events = self.flow.advance(&self.state, event);
+        self.event_queue.extend(next_events);
     }
 
-    /// 引擎内置的全局流程推进：在每个事件处理完毕后生成下一个流程事件。
-    /// 相当于原先的 StateMachine buff，但不再占用 buff 列表。
-    fn advance_flow(&mut self, event: &mut Event) {
-        let next_event = match event {
-            Event::DuelStart => Some(Event::RoundStart { round: 1 }),
-            Event::RoundStart { round } => {
-                self.get_players()
-                    .keys()
-                    .next()
-                    .map(|first_player_id| Event::BeforeTurn {
-                        round: *round,
-                        player_id: *first_player_id,
-                    })
-            }
-            Event::BeforeTurn { round, player_id } => Some(Event::Turn {
-                round: *round,
-                player_id: *player_id,
-            }),
-            Event::Turn { round, player_id } => Some(Event::AfterTurn {
-                round: *round,
-                player_id: *player_id,
-            }),
-            Event::AfterTurn { round, player_id } => {
-                if let Some(next_player_id) = self.get_next_player_not_around(*player_id) {
-                    Some(Event::BeforeTurn {
-                        round: *round,
-                        player_id: next_player_id,
-                    })
-                } else {
-                    Some(Event::RoundEnd { round: *round })
-                }
-            }
-            Event::RoundEnd { round } => Some(Event::RoundStart { round: *round + 1 }),
-            _ => None,
-        };
-
-        if let Some(next_event) = next_event {
-            self.queue_event(next_event);
-        }
+    fn check_end_conditions(&mut self, event: &Event) -> Option<GameResult> {
+        self.end_conditions
+            .iter_mut()
+            .find_map(|condition| condition.check(&self.state, event))
     }
 
     pub fn is_end(&self) -> bool {
@@ -204,18 +199,6 @@ impl World {
 }
 
 impl World {
-    pub fn get_next_player_not_around(&self, id: PlayerId) -> Option<PlayerId> {
-        self.players.range(id + 1..).next().map(|(id, _)| *id)
-    }
-
-    pub fn get_next_player_around(&self, id: PlayerId) -> Option<PlayerId> {
-        self.players
-            .range(id + 1..)
-            .next()
-            .or_else(|| self.players.range(..id).next())
-            .map(|(id, _)| *id)
-    }
-
     /// 完整跑一局：播下 DuelStart 后泵事件队列直到结束
     pub fn run(&mut self) {
         self.apply_event(&mut Event::DuelStart);
@@ -227,13 +210,6 @@ impl World {
         while let Some(mut event) = self.event_queue.pop_front() {
             if self.is_end() {
                 break;
-            }
-            if let Event::RoundStart { round } = event {
-                if round > MAX_ROUNDS {
-                    self.log(LogEntry::Draw);
-                    self.end = true;
-                    break;
-                }
             }
             self.apply_event(&mut event);
         }

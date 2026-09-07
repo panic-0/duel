@@ -7,7 +7,8 @@ pub use damage_reduction::DamageReduction;
 use super::{
     command::Commands,
     event::{Event, EventType},
-    world::World,
+    state::GameState,
+    BuffId,
 };
 
 /// 事件分发优先级：变体声明顺序即触发顺序（小者先触发）。
@@ -28,10 +29,10 @@ pub trait Buff: std::fmt::Debug {
     /// 声明该 buff 订阅的事件及触发优先级
     fn subscriptions(&self) -> Vec<(EventType, Priority)>;
     fn on_event(
-        &self,
+        &mut self,
         event: &mut Event,
-        world: &World,
+        world: &GameState,
         commands: &mut Commands,
-        buff_id: super::BuffId,
+        buff_id: BuffId,
     );
 }

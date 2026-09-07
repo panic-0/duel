@@ -5,12 +5,12 @@ use super::{
     buff::{Buff, Priority},
     command::Commands,
     event::{Event, EventType},
-    world::World,
+    state::GameState,
     BuffId, PlayerId,
 };
 
 pub trait Ability: std::fmt::Debug {
-    fn apply(&self, source_id: PlayerId, world: &World, commands: &mut Commands);
+    fn apply(&self, source_id: PlayerId, world: &GameState, commands: &mut Commands);
 }
 
 #[derive(Debug)]
@@ -34,11 +34,11 @@ impl Buff for Abilities {
     }
 
     fn on_event(
-        &self,
+        &mut self,
         event: &mut Event,
-        world: &World,
+        world: &GameState,
         commands: &mut Commands,
-        _buff_id: super::BuffId,
+        _buff_id: BuffId,
     ) {
         match *event {
             Event::Turn {

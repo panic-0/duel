@@ -1,11 +1,12 @@
-use super::super::{command::Commands, event::Event, log::LogEntry, world::World, PlayerId};
+use super::super::{
+    command::Commands, event::Event, log::LogEntry, state::GameState, BuffId, PlayerId,
+};
 use super::{Buff, EventType, Priority};
 
 #[derive(Debug)]
 pub struct DamageReduction {
     pub target_id: PlayerId,
     pub reduction_ratio: f64,
-    pub remaining_duration: Option<u32>,
 }
 
 impl DamageReduction {
@@ -13,7 +14,6 @@ impl DamageReduction {
         DamageReduction {
             target_id,
             reduction_ratio,
-            remaining_duration: None,
         }
     }
 }
@@ -24,11 +24,11 @@ impl Buff for DamageReduction {
     }
 
     fn on_event(
-        &self,
+        &mut self,
         event: &mut Event,
-        world: &World,
+        world: &GameState,
         _commands: &mut Commands,
-        _buff_id: super::super::BuffId,
+        _buff_id: BuffId,
     ) {
         match event {
             Event::PlayerAttack {

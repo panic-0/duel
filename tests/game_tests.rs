@@ -6,8 +6,10 @@ use duel::core::{
     buff::{Buff, DamageReduction, Priority, Revival},
     command::Commands,
     event::{Event, EventType},
+    flow::{FlowDriver, RoundLimit},
     log::{LogEntry, Logger},
     player::Player,
+    state::GameState,
     world::World,
     BuffId,
 };
@@ -43,9 +45,9 @@ impl Buff for RecordBuff {
     }
 
     fn on_event(
-        &self,
+        &mut self,
         _event: &mut Event,
-        _world: &World,
+        _world: &GameState,
         _commands: &mut Commands,
         _buff_id: BuffId,
     ) {
@@ -205,4 +207,64 @@ fn round_limit_stops_unwinnable_game() {
     assert!(world.get_player(p1).is_some(), "双方应都存活");
     assert!(world.get_player(p2).is_some());
     assert!(entries.borrow().contains(&LogEntry::Draw), "应记录平局日志");
+}
+
+// —— 可插拔流程与结束条件 ——
+
+/// 不生成任何后续事件的流程驱动
+#[derive(Debug)]
+struct NoFlow;
+
+impl FlowDriver for NoFlow {
+    fn advance(&mut self, _state: &GameState, _event: &Event) -> Vec<Event> {
+        vec![]
+    }
+}
+
+#[test]
+fn custom_flow_replaces_round_structure() {
+    let mut world = World::new();
+    world.add_player(Player::new("A".to_string(), 10, 5));
+    world.add_player(Player::new("B".to_string(), 10, 5));
+    world.set_flow(Box::new(NoFlow));
+
+    world.run();
+
+    // 没有任何流程事件生成，对局停留在 DuelStart 之后，不判结束
+    assert!(!world.is_end());
+    assert!(world.get_player(0).is_some());
+    assert!(world.get_player(1).is_some());
+}
+
+#[test]
+fn three_player_game_ends_with_single_survivor() {
+    let mut world = World::new();
+    for name in ["A", "B", "C"] {
+        world.add_player(Player::new(name.to_string(), 30, 10));
+    }
+    for id in 0..3 {
+        world.add_buff(Box::new(Abilities::new(id, vec![Box::new(Attack)])));
+    }
+
+    world.run();
+
+    assert!(world.is_end(), "三人对局应打到只剩一人");
+    let survivors: Vec<_> = world.get_players().keys().copied().collect();
+    assert_eq!(survivors.len(), 1);
+}
+
+#[test]
+fn custom_round_limit_ends_game_early() {
+    let mut world = World::new();
+    world.add_player(Player::new("A".to_string(), 100, 5));
+    world.add_player(Player::new("B".to_string(), 100, 5));
+    world.add_buff(Box::new(Abilities::new(0, vec![Box::new(Attack)])));
+    world.add_buff(Box::new(Abilities::new(1, vec![Box::new(Attack)])));
+    world.add_end_condition(Box::new(RoundLimit::new(2)));
+
+    world.run();
+
+    assert!(world.is_end(), "应因自定义回合上限提前结束");
+    assert!(world.get_player(0).is_some(), "2 回合内双方都应存活");
+    assert!(world.get_player(1).is_some());
 }

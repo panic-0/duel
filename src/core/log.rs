@@ -1,4 +1,4 @@
-use super::{world::World, PlayerId};
+use super::{state::GameState, PlayerId};
 
 /// 引擎产生的结构化日志：只携带 ID 和数值，展示（名字、颜色、文案）由打印端负责
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +33,8 @@ pub enum LogEntry {
     Draw,
 }
 
-/// 日志回调：拿到 `&World` 以便打印时解析玩家名
-pub type LogCallback = Box<dyn Fn(&World, &LogEntry)>;
+/// 日志回调：拿到 `&GameState` 以便打印时解析玩家名
+pub type LogCallback = Box<dyn Fn(&GameState, &LogEntry)>;
 
 /// 日志通道。默认为空（静音），安装回调后世界在运行时向外发射结构化日志
 #[derive(Default)]
@@ -45,9 +45,9 @@ impl Logger {
         Logger(Some(f))
     }
 
-    pub fn emit(&self, world: &World, entry: &LogEntry) {
+    pub fn emit(&self, state: &GameState, entry: &LogEntry) {
         if let Some(f) = &self.0 {
-            f(world, entry);
+            f(state, entry);
         }
     }
 }
