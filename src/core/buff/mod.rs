@@ -22,7 +22,7 @@ pub enum Priority {
     /// 结算（消费已被修改过的事件参数）
     Resolve,
     /// 兜底阶段，晚于结算触发（引擎的流程推进在所有 buff 之后进行）
-    StateMachine,
+    Final,
 }
 
 pub trait Buff: std::fmt::Debug {
