@@ -19,6 +19,12 @@ struct EventRegistration {
     buff_id: BuffId,
 }
 
+#[derive(Debug)]
+enum SettlementWork {
+    Dispatch(Event),
+    ConfirmDeath(PlayerId),
+}
+
 impl PartialOrd for EventRegistration {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -43,6 +49,8 @@ pub struct World {
     buff_id_counter: BuffId,
     event_registry: HashMap<EventType, BTreeSet<EventRegistration>>,
     event_queue: VecDeque<Event>,
+    /// Some 表示正在结算；命令产生的事件先收集到这里，再按因果顺序处理。
+    settlement_events: Option<Vec<Event>>,
     flow: Box<dyn FlowDriver>,
     end_conditions: Vec<Box<dyn EndCondition>>,
     end: bool,
@@ -56,6 +64,7 @@ impl World {
             buff_id_counter: 0,
             event_registry: HashMap::new(),
             event_queue: VecDeque::new(),
+            settlement_events: None,
             flow: Box::new(RoundRobinFlow),
             end_conditions: vec![
                 Box::new(RoundLimit::new(MAX_ROUNDS)),
@@ -150,23 +159,89 @@ impl World {
         self.state.log(entry);
     }
 
+    /// 批次外追加待处理事件；命令执行期间产生当前事件的子事件。
+    /// 子事件先于兄弟事件结算，外部事件之间保持先进先出。
+    /// 外部应通过 BeforeTurn 等流程入口发起行动，Turn 由流程驱动生成。
     pub fn queue_event(&mut self, event: Event) {
-        self.event_queue.push_back(event);
+        if let Some(children) = &mut self.settlement_events {
+            children.push(event);
+        } else {
+            self.event_queue.push_back(event);
+        }
     }
 
+    /// 同步结算一个事件及其全部子事件，不消费其他外部事件。
+    /// 监听者对根事件的修改会写回参数；流程事件留给 pump 处理。
+    ///
+    /// 每个事件先完成全部监听者和命令，再按深度优先处理子事件。
+    /// 死亡确认排在 BeforePlayerDeath 的子事件之后，终局判断排在整批之后。
+    /// 因而死亡触发的反击或召唤可以改变胜负，AfterTurn 不能越过攻击结算。
+    ///
+    /// # Panics
+    /// 在命令中重入驱动会触发断言；请使用 queue_event 产生反应。
+    /// 结算过程发生 panic 后，不支持恢复该 World 的执行。
     pub fn apply_event(&mut self, event: &mut Event) {
+        self.assert_not_settling();
         if self.is_end() {
             return;
         }
 
-        // 结束条件在分发前检查，命中的事件不再进入监听者
-        if let Some(result) = self.check_end_conditions(event) {
-            self.apply_end(result);
-            return;
+        self.settlement_events = Some(Vec::new());
+        let mut pending = VecDeque::from([SettlementWork::Dispatch(event.clone())]);
+        let mut settled = Vec::new();
+        let mut is_root = true;
+        while let Some(work) = pending.pop_front() {
+            let mut current = match work {
+                SettlementWork::Dispatch(event) => event,
+                SettlementWork::ConfirmDeath(id) => {
+                    self.resolve_death(id);
+                    let children = std::mem::take(self.settlement_events.as_mut().unwrap());
+                    for child in children.into_iter().rev() {
+                        pending.push_front(SettlementWork::Dispatch(child));
+                    }
+                    continue;
+                }
+            };
+            if matches!(current, Event::BeforePlayerDeath(id)
+                if self.state.get_player(id).is_none_or(|player| player.hp() != 0))
+            {
+                is_root = false;
+                continue;
+            }
+            self.dispatch_event(&mut current);
+            if let Event::BeforePlayerDeath(id) = current {
+                pending.push_front(SettlementWork::ConfirmDeath(id));
+            }
+            if is_root {
+                *event = current.clone();
+                is_root = false;
+            }
+            settled.push(current);
+            let children = std::mem::take(self.settlement_events.as_mut().unwrap());
+            // 反向插入队头，保持兄弟事件顺序，并先完成每个事件的整条反应链。
+            for child in children.into_iter().rev() {
+                pending.push_front(SettlementWork::Dispatch(child));
+            }
         }
+        self.settlement_events = None;
 
+        if let Some(result) = self
+            .end_conditions
+            .iter_mut()
+            .find_map(|condition| condition.check(&self.state, event))
+        {
+            self.apply_end(result);
+        }
+        if !self.is_end() {
+            for settled_event in settled {
+                self.event_queue
+                    .extend(self.flow.advance(&self.state, &settled_event));
+            }
+        }
+    }
+
+    fn dispatch_event(&mut self, event: &mut Event) {
         let mut commands = Commands::default();
-
         if let Some(registrations) = self.event_registry.get(&event.event_type()) {
             for registration in registrations {
                 if let Some(buff) = self.buffs.get_mut(&registration.buff_id) {
@@ -179,36 +254,22 @@ impl World {
             .commands
             .into_iter()
             .for_each(|command| command.apply(self));
-
-        self.resolve_death(event);
-
-        let next_events = self.flow.advance(&self.state, event);
-        self.event_queue.extend(next_events);
     }
 
-    /// 死亡结算：`BeforePlayerDeath` 的监听者（如复活）执行完后血量仍为 0，
-    /// 死亡坐实——记日志、移除玩家并入队 `AfterPlayerDeath` 终局通知。
-    /// 移除必须在此处完成：若延迟到终局通知之后，中间被处理的流程事件
-    /// 可能为已死玩家排出行动回合。
-    fn resolve_death(&mut self, event: &Event) {
-        if let Event::BeforePlayerDeath(id) = *event {
-            if self.state.get_player(id).is_some_and(|p| p.hp() == 0) {
-                self.log(LogEntry::Death { player_id: id });
-                self.state.remove_player(id);
-                self.queue_event(Event::AfterPlayerDeath(id));
+    fn assert_not_settling(&self) {
+        assert!(
+            self.settlement_events.is_none(),
+            "不能在结算期间重入驱动，请使用 queue_event"
+        );
+    }
 
-                // 移除玩家可能直接满足结束条件（如剩最后一人生还）
-                if let Some(result) = self.check_end_conditions(event) {
-                    self.apply_end(result);
-                }
-            }
+    /// BeforePlayerDeath 的整条反应链完成后再确认死亡；通知前立即移除玩家。
+    fn resolve_death(&mut self, id: PlayerId) {
+        if self.state.get_player(id).is_some_and(|p| p.hp() == 0) {
+            self.log(LogEntry::Death { player_id: id });
+            self.state.remove_player(id);
+            self.queue_event(Event::AfterPlayerDeath(id));
         }
-    }
-
-    fn check_end_conditions(&mut self, event: &Event) -> Option<GameResult> {
-        self.end_conditions
-            .iter_mut()
-            .find_map(|condition| condition.check(&self.state, event))
     }
 
     fn apply_end(&mut self, result: GameResult) {
@@ -226,16 +287,18 @@ impl World {
 impl World {
     /// 完整跑一局：播下 DuelStart 后泵事件队列直到结束
     pub fn run(&mut self) {
+        self.assert_not_settling();
         self.apply_event(&mut Event::DuelStart);
         self.pump();
     }
 
-    /// 泵事件队列直到结束或排空，可单独调用来分步驱动对局
+    /// 逐批结算外层队列直到结束或排空；不能在命令中重入调用。
     pub fn pump(&mut self) {
-        while let Some(mut event) = self.event_queue.pop_front() {
-            if self.is_end() {
+        self.assert_not_settling();
+        while !self.is_end() {
+            let Some(mut event) = self.event_queue.pop_front() else {
                 break;
-            }
+            };
             self.apply_event(&mut event);
         }
     }

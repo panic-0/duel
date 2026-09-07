@@ -312,7 +312,7 @@ fn dead_player_never_gets_another_turn() {
     assert!(world.is_end());
     assert_eq!(
         turns.borrow().iter().filter(|&&id| id == b).count(),
-        1,
-        "B 只应在死亡当轮行动一次，死亡后不得再获得回合"
+        0,
+        "B 在首次行动前已死亡，不应获得回合"
     );
 }
