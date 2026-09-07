@@ -19,8 +19,11 @@ struct AttackBuff {
 }
 
 impl Buff for AttackBuff {
-    fn buff_type(&self) -> BuffType {
-        BuffType::Attack
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        vec![
+            (EventType::BeforePlayerAttack, Priority::Default),
+            (EventType::PlayerAttack, Priority::Resolve),
+        ]
     }
 
     fn on_event(&self, event: &mut Event, world: &World, commands: &mut Commands, buff_id: BuffId) {

@@ -66,7 +66,6 @@ pub struct ApplyEvent {
 
 impl Command for ApplyEvent {
     fn apply(self: Box<Self>, world: &mut World) {
-        // world.queue_event(self.event);
-        world.apply_event(&mut self.event.clone());
+        world.queue_event(self.event);
     }
 }

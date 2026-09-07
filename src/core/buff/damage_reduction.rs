@@ -1,7 +1,8 @@
 use colored::Colorize;
 
 use super::super::{command::Commands, event::Event, world::World};
-use super::{Buff, BuffType, PlayerId};
+use super::{Buff, Priority, EventType};
+use super::super::PlayerId;
 
 #[derive(Debug)]
 pub struct DamageReduction {
@@ -21,8 +22,8 @@ impl DamageReduction {
 }
 
 impl Buff for DamageReduction {
-    fn buff_type(&self) -> BuffType {
-        BuffType::DamageReduction
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        vec![(EventType::PlayerAttack, Priority::Modify)]
     }
 
     fn on_event(

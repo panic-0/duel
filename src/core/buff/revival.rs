@@ -2,11 +2,12 @@ use colored::Colorize;
 
 use super::super::{
     command::{Commands, RemoveBuff},
-    event::Event,
+    event::{Event, EventType},
     modifier::HpModifier,
     world::World,
+    PlayerId,
 };
-use super::{Buff, BuffType, PlayerId};
+use super::{Buff, Priority};
 
 #[derive(Debug)]
 pub struct Revival {
@@ -20,8 +21,8 @@ impl Revival {
 }
 
 impl Buff for Revival {
-    fn buff_type(&self) -> BuffType {
-        BuffType::Revival
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        vec![(EventType::BeforePlayerDeath, Priority::Default)]
     }
 
     fn on_event(

@@ -1,16 +1,26 @@
 use super::super::{
     command::{ApplyEvent, Commands},
-    event::Event,
+    event::{Event, EventType},
     world::World,
 };
-use super::{Buff, BuffType};
+use super::{Buff, Priority};
 
 #[derive(Debug)]
 pub struct StateMachine;
 
 impl Buff for StateMachine {
-    fn buff_type(&self) -> BuffType {
-        BuffType::StateMachine
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        [
+            EventType::DuelStart,
+            EventType::RoundStart,
+            EventType::BeforeTurn,
+            EventType::Turn,
+            EventType::AfterTurn,
+            EventType::RoundEnd,
+        ]
+        .into_iter()
+        .map(|event_type| (event_type, Priority::StateMachine))
+        .collect()
     }
 
     fn on_event(

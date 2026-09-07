@@ -1,18 +1,19 @@
 use super::{
-    buff::{get_event_priorities, Buff, BuffType},
+    buff::{Buff, Priority},
     command::Commands,
     event::{Event, EventType},
     player::Player,
     BuffId, PlayerId,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use strum::IntoEnumIterator;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 单场对局的最大回合数，防止无限对局挂起
+const MAX_ROUNDS: u32 = 10000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EventRegistration {
-    priority: u32,
+    priority: Priority,
     buff_id: BuffId,
-    buff_type: BuffType,
 }
 
 impl PartialOrd for EventRegistration {
@@ -36,7 +37,7 @@ pub struct World {
     buffs: BTreeMap<BuffId, Box<dyn Buff>>,
     buff_id_counter: BuffId,
     event_registry: HashMap<EventType, BTreeSet<EventRegistration>>,
-    buff_to_events: HashMap<BuffId, Vec<EventType>>,
+    event_queue: VecDeque<Event>,
     end: bool,
 }
 
@@ -48,7 +49,7 @@ impl World {
             buffs: BTreeMap::new(),
             buff_id_counter: 0,
             event_registry: HashMap::new(),
-            buff_to_events: HashMap::new(),
+            event_queue: VecDeque::new(),
             end: false,
         }
     }
@@ -80,25 +81,9 @@ impl World {
         let id = self.buff_id_counter;
         self.buff_id_counter += 1;
 
-        let buff_type = buff.buff_type();
-        let mut registered_events = Vec::new();
-        for event_type in EventType::iter() {
-            let priorities = get_event_priorities(event_type);
-            let index = priorities.iter().position(|&bt| bt == buff_type);
-            if let Some(index) = index {
-                let priority = index as u32;
-                let registrations = self.event_registry.entry(event_type).or_default();
-                registrations.insert(EventRegistration {
-                    priority,
-                    buff_id: id,
-                    buff_type,
-                });
-                registered_events.push(event_type);
-            }
-        }
-
-        if !registered_events.is_empty() {
-            self.buff_to_events.insert(id, registered_events);
+        for (event_type, priority) in buff.subscriptions() {
+            let registrations = self.event_registry.entry(event_type).or_default();
+            registrations.insert(EventRegistration { priority, buff_id: id });
         }
 
         self.buffs.insert(id, buff);
@@ -107,12 +92,8 @@ impl World {
 
     pub fn remove_buff(&mut self, id: BuffId) -> Option<Box<dyn Buff>> {
         if let Some(buff) = self.buffs.remove(&id) {
-            if let Some(event_types) = self.buff_to_events.remove(&id) {
-                for event_type in event_types {
-                    if let Some(registrations) = self.event_registry.get_mut(&event_type) {
-                        registrations.retain(|reg| reg.buff_id != id);
-                    }
-                }
+            for registrations in self.event_registry.values_mut() {
+                registrations.retain(|reg| reg.buff_id != id);
             }
             Some(buff)
         } else {
@@ -130,6 +111,10 @@ impl World {
 
     pub fn get_buff_mut(&mut self, id: BuffId) -> Option<&mut Box<dyn Buff>> {
         self.buffs.get_mut(&id)
+    }
+
+    pub fn queue_event(&mut self, event: Event) {
+        self.event_queue.push_back(event);
     }
 
     pub fn apply_event(&mut self, event: &mut Event) {
@@ -177,6 +162,20 @@ impl World {
     pub fn run(mut self) {
         self.add_buff(Box::new(super::buff::StateMachine));
         self.apply_event(&mut Event::DuelStart);
+
+        while let Some(mut event) = self.event_queue.pop_front() {
+            if self.is_end() {
+                break;
+            }
+            if let Event::RoundStart { round } = event {
+                if round > MAX_ROUNDS {
+                    println!("已达到最大回合数（{}），平局", MAX_ROUNDS);
+                    self.end = true;
+                    break;
+                }
+            }
+            self.apply_event(&mut event);
+        }
     }
 }
 
@@ -202,34 +201,13 @@ impl World {
     }
 
     pub fn validate_registry_consistency(&self) -> bool {
-        for (buff_id, event_types) in &self.buff_to_events {
-            if !self.buffs.contains_key(buff_id) {
-                return false;
-            }
-
-            for &event_type in event_types {
-                if let Some(registrations) = self.event_registry.get(&event_type) {
-                    if !registrations.iter().any(|reg| reg.buff_id == *buff_id) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        }
-
         for registrations in self.event_registry.values() {
             for registration in registrations {
                 if !self.buffs.contains_key(&registration.buff_id) {
                     return false;
                 }
-
-                if !self.buff_to_events.contains_key(&registration.buff_id) {
-                    return false;
-                }
             }
         }
-
         true
     }
 }

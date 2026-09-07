@@ -2,9 +2,9 @@ pub mod attack;
 pub use attack::Attack;
 
 use super::{
-    buff::{Buff, BuffType},
+    buff::{Buff, Priority},
     command::Commands,
-    event::Event,
+    event::{Event, EventType},
     world::World,
     BuffId, PlayerId,
 };
@@ -29,8 +29,8 @@ impl Abilities {
 }
 
 impl Buff for Abilities {
-    fn buff_type(&self) -> BuffType {
-        BuffType::Abilities
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        vec![(EventType::Turn, Priority::Default)]
     }
 
     fn on_event(

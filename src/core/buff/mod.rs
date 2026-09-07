@@ -11,44 +11,25 @@ use super::{
     command::Commands,
     event::{Event, EventType},
     world::World,
-    PlayerId,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum BuffType {
-    // World Buffs
+/// 事件分发优先级：变体声明顺序即触发顺序（小者先触发）。
+/// 同优先级按 buff_id 升序（先注册先触发）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// 修改事件参数（如减伤改写伤害值），在其他监听者之前触发
+    Modify,
+    /// 常规监听
+    Default,
+    /// 结算（消费已被修改过的事件参数）
+    Resolve,
+    /// 全局状态推进，始终最后触发
     StateMachine,
-
-    // Player Buffs
-    Abilities,
-
-    Attack,
-
-    DamageReduction,
-    Revival,
-}
-
-pub fn get_event_priorities(event_type: EventType) -> &'static [BuffType] {
-    match event_type {
-        // State events - 状态机在最后处理，用于生成下一个状态
-        EventType::DuelStart => &[BuffType::StateMachine],
-        EventType::RoundStart => &[BuffType::StateMachine],
-        EventType::BeforeTurn => &[BuffType::StateMachine],
-        EventType::Turn => &[BuffType::Abilities, BuffType::StateMachine],
-        EventType::AfterTurn => &[BuffType::StateMachine],
-        EventType::RoundEnd => &[BuffType::StateMachine],
-
-        // Action events
-        EventType::BeforePlayerAttack => &[BuffType::Attack],
-        EventType::PlayerAttack => &[BuffType::DamageReduction, BuffType::Attack],
-        EventType::AfterPlayerAttack => &[],
-        EventType::BeforePlayerDeath => &[BuffType::Revival],
-        EventType::AfterPlayerDeath => &[],
-    }
 }
 
 pub trait Buff: std::fmt::Debug {
-    fn buff_type(&self) -> BuffType;
+    /// 声明该 buff 订阅的事件及触发优先级
+    fn subscriptions(&self) -> Vec<(EventType, Priority)>;
     fn on_event(
         &self,
         event: &mut Event,

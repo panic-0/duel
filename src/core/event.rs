@@ -1,5 +1,4 @@
 use super::PlayerId;
-use strum_macros::EnumIter;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Event {
@@ -44,7 +43,7 @@ pub enum Event {
     AfterPlayerDeath(PlayerId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     // State events
     DuelStart,
