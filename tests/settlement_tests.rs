@@ -5,9 +5,10 @@ use duel::core::{
     buff::{Buff, Priority},
     command::{AddPlayer, ApplyEvent, Command, Commands},
     event::{Event, EventType},
-    flow::{EndCondition, FlowDriver, GameResult, RoundLimit},
+    flow::{EndCondition, FlowDriver, GameResult},
     log::{LogEntry, Logger},
     modifier::HpModifier,
+    operation::{AddPlayerOperation, Damage, EmitEvent, Heal, Operation},
     player::Player,
     state::GameState,
     world::World,
@@ -49,6 +50,49 @@ fn effect(
     handler: impl FnMut(&mut Event, &GameState, &mut Commands, BuffId) + 'static,
 ) {
     world.add_buff(Box::new(Effect {
+        subscriptions: events
+            .iter()
+            .map(|&event| (event, Priority::Default))
+            .collect(),
+        handler: Box::new(handler),
+    }));
+}
+
+/// Operation 路径的监听者：以不可变事件产生后续操作。
+type OpHandler = dyn FnMut(&Event, &GameState) -> Vec<Box<dyn Operation>>;
+
+struct OpEffect {
+    subscriptions: Vec<(EventType, Priority)>,
+    handler: Box<OpHandler>,
+}
+
+impl fmt::Debug for OpEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OpEffect")
+    }
+}
+
+impl Buff for OpEffect {
+    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
+        self.subscriptions.clone()
+    }
+
+    fn operations(
+        &mut self,
+        event: &Event,
+        state: &GameState,
+        _buff_id: BuffId,
+    ) -> Vec<Box<dyn Operation>> {
+        (self.handler)(event, state)
+    }
+}
+
+fn op_effect(
+    world: &mut World,
+    events: &[EventType],
+    handler: impl FnMut(&Event, &GameState) -> Vec<Box<dyn Operation>> + 'static,
+) {
+    world.add_buff(Box::new(OpEffect {
         subscriptions: events
             .iter()
             .map(|&event| (event, Priority::Default))
@@ -139,24 +183,24 @@ fn death_confirmation_waits_for_queued_revival() {
 #[test]
 fn death_summon_finishes_before_last_survivor_check() {
     let mut world = World::new();
-    world.set_flow(Box::new(NoFlow));
     world.add_player(Player::new("攻击者".into(), 10, 10));
     let target = world.add_player(Player::new("召唤者".into(), 10, 1));
-    effect(
-        &mut world,
-        &[EventType::AfterPlayerDeath],
-        |_, _, commands, _| {
-            commands.push(AddPlayer {
-                player: Player::new("召唤物".into(), 10, 1),
-            });
-        },
-    );
-    world.run();
-    Box::new(HpModifier::damage(target, 10)).apply(&mut world);
-    world.pump();
+    world.add_buff(Box::new(Abilities::new(0, vec![Box::new(Attack)])));
+    op_effect(&mut world, &[EventType::AfterPlayerDeath], |_, _| {
+        vec![
+            Box::new(AddPlayerOperation(Player::new("召唤物".into(), 10, 1))) as Box<dyn Operation>,
+        ]
+    });
+    // 召唤发生在死亡通知内、下一个检查点之前，
+    // 因此“只剩一人”的胜负判断始终不成立，对局一直有新对手。
+    world.run_with_max_rounds(4).expect("对局应正常结束");
     assert!(world.get_player(target).is_none());
-    assert_eq!(world.get_players().len(), 2);
-    assert!(!world.is_end(), "死亡召唤产生新对手后，对局应继续");
+    assert_eq!(
+        world.get_players().len(),
+        2,
+        "召唤物应接替死亡者，使对局持续"
+    );
+    assert!(world.is_end(), "到达回合上限后以平局结束");
 }
 
 #[test]
@@ -183,28 +227,32 @@ fn actor_dying_during_its_turn_still_gets_after_turn_when_game_continues() {
     let a = world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
     world.add_player(Player::new("C".into(), 10, 1));
-    world.add_end_condition(Box::new(RoundLimit::new(1)));
     let after_turns = Rc::new(RefCell::new(Vec::new()));
     let sink = after_turns.clone();
-    effect(
+    op_effect(
         &mut world,
-        &[EventType::Turn, EventType::AfterTurn],
-        move |event, _, commands, _| match event {
-            Event::Turn { player_id, .. } if *player_id == a => {
-                commands.push(HpModifier::damage(a, 10))
+        &[EventType::Turn],
+        move |event, _| match *event {
+            Event::Turn { player_id, .. } if player_id == a => {
+                vec![Box::new(Damage::new(None, a, 10)) as Box<dyn Operation>]
             }
-            Event::AfterTurn { player_id, .. } => sink.borrow_mut().push(*player_id),
-            _ => {}
+            _ => vec![],
         },
     );
-    world.run();
+    op_effect(&mut world, &[EventType::AfterTurn], move |event, _| {
+        if let Event::AfterTurn { player_id, .. } = *event {
+            sink.borrow_mut().push(player_id);
+        }
+        vec![]
+    });
+    world.run_with_max_rounds(1).expect("对局应正常结束");
     assert_eq!(*after_turns.borrow(), vec![0, 1, 2]);
 }
 
 fn trace_events(world: &mut World) -> Rc<RefCell<Vec<Event>>> {
     let trace = Rc::new(RefCell::new(Vec::new()));
     let sink = trace.clone();
-    effect(
+    op_effect(
         world,
         &[
             EventType::DuelStart,
@@ -219,7 +267,10 @@ fn trace_events(world: &mut World) -> Rc<RefCell<Vec<Event>>> {
             EventType::BeforePlayerDeath,
             EventType::AfterPlayerDeath,
         ],
-        move |event, _, _, _| sink.borrow_mut().push(event.clone()),
+        move |event, _state| {
+            sink.borrow_mut().push(event.clone());
+            vec![]
+        },
     );
     trace
 }
@@ -231,16 +282,20 @@ fn fatal_attack_completes_notifications_and_retaliation_before_ending() {
     let b = world.add_player(Player::new("B".into(), 10, 1));
     world.add_buff(Box::new(Abilities::new(a, vec![Box::new(Attack)])));
     let trace = trace_events(&mut world);
-    effect(
+    let victim = b;
+    let avenger = a;
+    op_effect(
         &mut world,
         &[EventType::AfterPlayerDeath],
-        move |event, _, commands, _| {
-            if *event == Event::AfterPlayerDeath(b) {
-                commands.push(HpModifier::damage(a, 10));
+        move |event, _state| {
+            if *event == Event::AfterPlayerDeath(victim) {
+                vec![Box::new(Damage::new(None, avenger, 10))]
+            } else {
+                vec![]
             }
         },
     );
-    world.run();
+    world.run().expect("对局应正常结束");
     assert!(world.is_end());
     assert!(world.get_players().is_empty());
     assert_eq!(
@@ -288,12 +343,17 @@ fn ordinary_attack_finishes_before_after_turn() {
     let a = world.add_player(Player::new("A".into(), 10, 1));
     let b = world.add_player(Player::new("B".into(), 10, 1));
     world.add_buff(Box::new(Abilities::new(a, vec![Box::new(Attack)])));
-    world.add_end_condition(Box::new(RoundLimit::new(1)));
     let trace = trace_events(&mut world);
-    world.run();
+    world.run().expect("对局应正常结束");
+    // Operation 路径的事件顺序是确定的：回合通知完成后才执行正常行动，
+    // 行动及其全部反应完成后再发布 AfterTurn。
     assert_eq!(
-        &trace.borrow()[4..8],
+        &trace.borrow()[3..8],
         &[
+            Event::Turn {
+                round: 1,
+                player_id: a
+            },
             Event::BeforePlayerAttack {
                 source_id: a,
                 target_id: b
@@ -314,7 +374,8 @@ fn ordinary_attack_finishes_before_after_turn() {
             },
         ]
     );
-    assert!(!trace.borrow().contains(&Event::RoundStart { round: 2 }));
+    assert!(world.is_end(), "B 血量耗尽后对局应结束");
+    assert!(world.get_player(b).is_none());
 }
 
 #[test]
@@ -323,33 +384,31 @@ fn before_turn_death_skips_action_but_continues_round() {
     let a = world.add_player(Player::new("A".into(), 10, 1));
     let b = world.add_player(Player::new("B".into(), 10, 1));
     let c = world.add_player(Player::new("C".into(), 10, 1));
-    world.add_end_condition(Box::new(RoundLimit::new(1)));
     let trace = trace_events(&mut world);
-    effect(
-        &mut world,
-        &[EventType::BeforeTurn, EventType::PlayerAttack],
-        move |event, _, commands, _| {
-            match *event {
-                Event::BeforeTurn { player_id, .. } if player_id == b => {
-                    // E 属于 BeforeTurn(B) 的结算批次，其死亡反应必须先完成。
-                    commands.push(ApplyEvent {
-                        event: Event::PlayerAttack {
-                            source_id: a,
-                            target_id: b,
-                            damage: 10,
-                        },
-                    });
-                }
-                Event::PlayerAttack {
-                    target_id, damage, ..
-                } if target_id == b => {
-                    commands.push(HpModifier::damage(b, damage));
-                }
-                _ => {}
+    op_effect(&mut world, &[EventType::BeforeTurn], move |event, _| {
+        match *event {
+            Event::BeforeTurn { player_id, .. } if player_id == b => {
+                // E 属于 BeforeTurn(B) 的结算批次，其死亡反应必须先完成。
+                vec![Box::new(EmitEvent(Event::PlayerAttack {
+                    source_id: a,
+                    target_id: b,
+                    damage: 10,
+                })) as Box<dyn Operation>]
             }
+            _ => vec![],
+        }
+    });
+    op_effect(
+        &mut world,
+        &[EventType::PlayerAttack],
+        |event, _| match *event {
+            Event::PlayerAttack {
+                target_id, damage, ..
+            } => vec![Box::new(Damage::new(None, target_id, damage)) as Box<dyn Operation>],
+            _ => vec![],
         },
     );
-    world.run();
+    world.run_with_max_rounds(1).expect("对局应正常结束");
     let actors: Vec<_> = trace
         .borrow()
         .iter()
@@ -496,7 +555,18 @@ fn flow_observes_mutated_events_in_dispatch_order_with_final_state() {
     );
     assert_eq!(
         *calls.borrow(),
-        vec![(event, 7), (Event::RoundEnd { round: 1 }, 7)]
+        vec![
+            (event, 7),
+            (Event::RoundEnd { round: 1 }, 7),
+            (
+                Event::HpChanged {
+                    target_id: 0,
+                    old_hp: 10,
+                    new_hp: 7
+                },
+                7
+            ),
+        ]
     );
     world.pump();
     assert_eq!(
@@ -543,28 +613,13 @@ fn end_conditions_check_root_once_after_settlement() {
 #[test]
 fn round_limit_ends_after_round_end_reactions_without_needing_another_round() {
     let mut world = World::new();
-    world.set_flow(Box::new(NoFlow));
     let a = world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
     world.get_player_mut(a).unwrap().set_hp(5);
-    world.add_end_condition(Box::new(RoundLimit::new(1)));
-    effect(
-        &mut world,
-        &[EventType::RoundEnd, EventType::AfterPlayerAttack],
-        move |event, _, commands, _| match event {
-            Event::RoundEnd { .. } => commands.push(ApplyEvent {
-                event: Event::AfterPlayerAttack {
-                    source_id: a,
-                    target_id: a,
-                    damage: 0,
-                },
-            }),
-            Event::AfterPlayerAttack { .. } => commands.push(HpModifier::heal(a, 2)),
-            _ => {}
-        },
-    );
-    world.run();
-    world.apply_event(&mut Event::RoundEnd { round: 1 });
+    op_effect(&mut world, &[EventType::RoundEnd], move |_, _| {
+        vec![Box::new(Heal::new(a, 2)) as Box<dyn Operation>]
+    });
+    world.run_with_max_rounds(1).expect("对局应正常结束");
     assert_eq!(
         world.get_player(a).unwrap().hp(),
         7,
@@ -578,14 +633,14 @@ fn zero_round_limit_finishes_start_effects_without_starting_a_round() {
     let mut world = World::new();
     world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
-    world.add_end_condition(Box::new(RoundLimit::new(0)));
     let trace = trace_events(&mut world);
-    effect(&mut world, &[EventType::DuelStart], |_, _, commands, _| {
-        commands.push(AddPlayer {
-            player: Player::new("开局召唤物".into(), 10, 1),
-        });
+    op_effect(&mut world, &[EventType::DuelStart], |_, _| {
+        vec![
+            Box::new(AddPlayerOperation(Player::new("开局召唤物".into(), 10, 1)))
+                as Box<dyn Operation>,
+        ]
     });
-    world.run();
+    world.run_with_max_rounds(0).expect("对局应正常结束");
     assert!(world.is_end());
     assert_eq!(world.get_players().len(), 3);
     assert_eq!(*trace.borrow(), vec![Event::DuelStart]);
@@ -627,7 +682,9 @@ impl Command for Reenter {
         match *self {
             Self::Apply => world.apply_event(&mut Event::RoundEnd { round: 1 }),
             Self::Pump => world.pump(),
-            Self::Run => world.run(),
+            Self::Run => {
+                let _ = world.run();
+            }
         }
     }
 }

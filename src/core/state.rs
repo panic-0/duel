@@ -46,17 +46,24 @@ impl GameState {
         self.players.get_mut(&id)
     }
 
-    /// id 之后第一个存活的玩家（不回绕）
+    /// id 之后第一个存活玩家（不回绕）
     pub fn get_next_player_not_around(&self, id: PlayerId) -> Option<PlayerId> {
-        self.players.range(id + 1..).next().map(|(id, _)| *id)
+        self.players
+            .range(id + 1..)
+            .find(|(_, player)| player.is_alive())
+            .map(|(id, _)| *id)
     }
 
-    /// id 之后第一个存活的玩家（回绕到队首）
+    /// id 之后第一个存活玩家（回绕到队首）
     pub fn get_next_player_around(&self, id: PlayerId) -> Option<PlayerId> {
         self.players
             .range(id + 1..)
-            .next()
-            .or_else(|| self.players.range(..id).next())
+            .find(|(_, player)| player.is_alive())
+            .or_else(|| {
+                self.players
+                    .range(..id)
+                    .find(|(_, player)| player.is_alive())
+            })
             .map(|(id, _)| *id)
     }
 

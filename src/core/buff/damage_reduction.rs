@@ -1,7 +1,6 @@
-use super::super::{
-    command::Commands, event::Event, log::LogEntry, state::GameState, BuffId, PlayerId,
-};
-use super::{Buff, EventType, Priority};
+use super::super::operation::DamageContext;
+use super::super::{log::LogEntry, state::GameState, BuffId, PlayerId};
+use super::{Buff, Priority};
 
 #[derive(Debug)]
 pub struct DamageReduction {
@@ -19,32 +18,25 @@ impl DamageReduction {
 }
 
 impl Buff for DamageReduction {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::PlayerAttack, Priority::Modify)]
+    fn owner(&self) -> Option<PlayerId> {
+        Some(self.target_id)
     }
 
-    fn on_event(
-        &mut self,
-        event: &mut Event,
-        world: &GameState,
-        _commands: &mut Commands,
-        _buff_id: BuffId,
-    ) {
-        match event {
-            Event::PlayerAttack {
-                target_id, damage, ..
-            } if *target_id == self.target_id => {
-                let original_damage = *damage;
-                let reduced_damage = (original_damage as f64 * (1.0 - self.reduction_ratio)) as u64;
-                *damage = reduced_damage;
+    fn damage_modification(&self) -> Option<Priority> {
+        Some(Priority::Modify)
+    }
 
-                world.log(LogEntry::DamageReduced {
-                    target_id: self.target_id,
-                    original: original_damage,
-                    reduced: reduced_damage,
-                });
-            }
-            _ => {}
+    fn modify_damage(&self, context: &mut DamageContext, world: &GameState, _buff_id: BuffId) {
+        if context.target_id != self.target_id {
+            return;
         }
+        let original = context.amount;
+        let reduced = (original as f64 * (1.0 - self.reduction_ratio)) as u64;
+        context.reduce_to(reduced);
+        world.log(LogEntry::DamageReduced {
+            target_id: self.target_id,
+            original,
+            reduced,
+        });
     }
 }

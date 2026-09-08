@@ -108,5 +108,5 @@ fn main() {
     world.add_buff(Box::new(core::buff::DamageReduction::new(player2_id, 0.2)));
 
     world.set_logger(Logger::new(Box::new(print_log)));
-    world.run();
+    world.run().expect("对局应正常执行");
 }

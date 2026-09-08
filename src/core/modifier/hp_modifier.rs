@@ -1,4 +1,4 @@
-use super::super::log::LogEntry;
+use super::super::operation::{ExecutionContext, Operation, OperationError, OperationResult};
 use super::*;
 
 #[derive(Debug)]
@@ -26,36 +26,18 @@ impl HpModifier {
 
 impl Command for HpModifier {
     fn apply(self: Box<Self>, world: &mut World) {
-        let (old_hp, new_hp, max_hp) = {
-            let Some(target) = world.get_player_mut(self.target_id) else {
-                return;
-            };
-            let old_hp = target.hp();
-            let new_hp = target.modify_hp(self.modifier);
-            (old_hp, new_hp, target.max_hp())
+        let _ = world.modify_hp(self.target_id, self.modifier);
+    }
+}
+
+impl Operation for HpModifier {
+    fn execute(
+        self: Box<Self>,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<(OperationResult, Option<Box<dyn std::any::Any>>), OperationError> {
+        let Some(change) = context.modify_hp(self.target_id, self.modifier)? else {
+            return Ok((OperationResult::Skipped, None));
         };
-
-        // 显示伤害/治疗信息
-        use std::cmp::Ordering;
-        match self.modifier.cmp(&0) {
-            Ordering::Less => world.log(LogEntry::Damage {
-                target_id: self.target_id,
-                amount: (-self.modifier) as u64,
-                hp: new_hp,
-                max_hp,
-            }),
-            Ordering::Greater => world.log(LogEntry::Heal {
-                target_id: self.target_id,
-                amount: self.modifier as u64,
-                hp: new_hp,
-                max_hp,
-            }),
-            Ordering::Equal => {}
-        }
-
-        // 血量跨越 0 只报告事实；死亡判定、终局通知与移除由引擎的死亡结算处理
-        if old_hp > 0 && new_hp == 0 {
-            world.queue_event(Event::BeforePlayerDeath(self.target_id));
-        }
+        Ok((OperationResult::Completed, Some(Box::new(change))))
     }
 }

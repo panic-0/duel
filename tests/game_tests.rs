@@ -4,10 +4,9 @@ use std::rc::Rc;
 use duel::core::{
     ability::{Abilities, Attack},
     buff::{Buff, DamageReduction, Priority, Revival},
-    command::Commands,
     event::{Event, EventType},
-    flow::{FlowDriver, RoundLimit},
     log::{LogEntry, Logger},
+    operation::{completed, ExecutionContext, Operation, OperationError, OperationOutcome},
     player::Player,
     state::GameState,
     world::World,
@@ -44,14 +43,14 @@ impl Buff for RecordBuff {
         vec![(self.event_type, self.priority)]
     }
 
-    fn on_event(
+    fn operations(
         &mut self,
-        _event: &mut Event,
+        _event: &Event,
         _world: &GameState,
-        _commands: &mut Commands,
         _buff_id: BuffId,
-    ) {
+    ) -> Vec<Box<dyn duel::core::Operation>> {
         self.triggered.borrow_mut().push(self.tag);
+        vec![]
     }
 }
 
@@ -78,7 +77,7 @@ fn full_game_runs_to_expected_outcome() {
     world.add_buff(Box::new(Abilities::new(p2, vec![Box::new(Attack)])));
     world.add_buff(Box::new(DamageReduction::new(p2, 0.2)));
 
-    world.run();
+    world.run().expect("对局应正常结束");
 
     assert!(world.is_end());
     assert!(world.get_player(p1).is_none(), "Player1 应已死亡移除");
@@ -99,7 +98,7 @@ fn revival_triggers_exactly_once() {
     world.add_buff(Box::new(Revival::new(p1)));
     world.add_buff(Box::new(Abilities::new(p2, vec![Box::new(Attack)])));
 
-    world.run();
+    world.run().expect("对局应正常结束");
 
     let entries = entries.borrow();
     assert_eq!(
@@ -201,7 +200,7 @@ fn round_limit_stops_unwinnable_game() {
     world.add_buff(Box::new(Abilities::new(p2, vec![Box::new(Attack)])));
     world.add_buff(Box::new(DamageReduction::new(p2, 1.0)));
 
-    world.run();
+    world.run().expect("对局应正常结束");
 
     assert!(world.is_end(), "无限对局应被回合上限终止");
     assert!(world.get_player(p1).is_some(), "双方应都存活");
@@ -209,28 +208,31 @@ fn round_limit_stops_unwinnable_game() {
     assert!(entries.borrow().contains(&LogEntry::Draw), "应记录平局日志");
 }
 
-// —— 可插拔流程与结束条件 ——
+// —— 自定义流程：流程本身就是普通 Operation ——
 
-/// 不生成任何后续事件的流程驱动
+/// 只发布开局通知、不安排任何回合的自定义流程
 #[derive(Debug)]
-struct NoFlow;
+struct OpeningOnly;
 
-impl FlowDriver for NoFlow {
-    fn advance(&mut self, _state: &GameState, _event: &Event) -> Vec<Event> {
-        vec![]
+impl Operation for OpeningOnly {
+    fn execute(
+        self: Box<Self>,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<OperationOutcome, OperationError> {
+        context.try_publish(Event::DuelStart)?;
+        completed()
     }
 }
 
 #[test]
-fn custom_flow_replaces_round_structure() {
+fn custom_flow_operation_replaces_round_structure() {
     let mut world = World::new();
     world.add_player(Player::new("A".to_string(), 10, 5));
     world.add_player(Player::new("B".to_string(), 10, 5));
-    world.set_flow(Box::new(NoFlow));
 
-    world.run();
+    world.execute(OpeningOnly).expect("自定义流程应正常执行");
 
-    // 没有任何流程事件生成，对局停留在 DuelStart 之后，不判结束
+    // 流程只发布了 DuelStart，对局停留在开局之后，不判结束
     assert!(!world.is_end());
     assert!(world.get_player(0).is_some());
     assert!(world.get_player(1).is_some());
@@ -246,7 +248,7 @@ fn three_player_game_ends_with_single_survivor() {
         world.add_buff(Box::new(Abilities::new(id, vec![Box::new(Attack)])));
     }
 
-    world.run();
+    world.run().expect("对局应正常结束");
 
     assert!(world.is_end(), "三人对局应打到只剩一人");
     let survivors: Vec<_> = world.get_players().keys().copied().collect();
@@ -260,11 +262,10 @@ fn custom_round_limit_ends_game_early() {
     world.add_player(Player::new("B".to_string(), 100, 5));
     world.add_buff(Box::new(Abilities::new(0, vec![Box::new(Attack)])));
     world.add_buff(Box::new(Abilities::new(1, vec![Box::new(Attack)])));
-    world.add_end_condition(Box::new(RoundLimit::new(2)));
 
-    world.run();
+    world.run_with_max_rounds(2).expect("对局应正常结束");
 
-    assert!(world.is_end(), "应因自定义回合上限提前结束");
+    assert!(world.is_end(), "应因回合上限提前结束");
     assert!(world.get_player(0).is_some(), "2 回合内双方都应存活");
     assert!(world.get_player(1).is_some());
 }
@@ -280,16 +281,16 @@ impl Buff for TurnSpy {
         vec![(EventType::Turn, Priority::Final)]
     }
 
-    fn on_event(
+    fn operations(
         &mut self,
-        event: &mut Event,
+        event: &Event,
         _world: &GameState,
-        _commands: &mut Commands,
         _buff_id: BuffId,
-    ) {
+    ) -> Vec<Box<dyn duel::core::Operation>> {
         if let Event::Turn { player_id, .. } = *event {
             self.turns.borrow_mut().push(player_id);
         }
+        vec![]
     }
 }
 
@@ -307,11 +308,14 @@ fn dead_player_never_gets_another_turn() {
         world.add_buff(Box::new(Abilities::new(id, vec![Box::new(Attack)])));
     }
 
-    world.run();
+    world.run().expect("对局应正常结束");
 
     assert!(world.is_end());
+    let recorded = turns.borrow();
+    assert!(!recorded.is_empty(), "探针应记录到真实的回合序列，而非空集");
+    assert_eq!(&recorded[..2], &[a, c], "首轮依次是 A 与 C 的回合");
     assert_eq!(
-        turns.borrow().iter().filter(|&&id| id == b).count(),
+        recorded.iter().filter(|&&id| id == b).count(),
         0,
         "B 在首次行动前已死亡，不应获得回合"
     );

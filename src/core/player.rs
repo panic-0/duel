@@ -16,7 +16,7 @@ impl Player {
         }
     }
 
-    // Getters
+    // 只读访问
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -41,14 +41,29 @@ impl Player {
         self.hp as f64 / self.max_hp as f64
     }
 
-    // Setters with validation
+    // 带校验的写入
+    /// 仅限对局开始前的初始配置；运行期的生命变化必须走受控提交
+    /// （ExecutionContext::modify_hp / submit_damage），否则不会产生基础事件。
     pub fn set_hp(&mut self, hp: u64) {
         self.hp = hp.min(self.max_hp);
     }
 
     pub fn modify_hp(&mut self, modifier: i64) -> u64 {
-        let new_hp = (self.hp as i64 + modifier).max(0) as u64;
-        self.set_hp(new_hp);
+        if modifier < 0 {
+            self.damage(modifier.unsigned_abs());
+        } else {
+            self.heal(modifier as u64);
+        }
+        self.hp
+    }
+
+    pub(crate) fn damage(&mut self, amount: u64) -> u64 {
+        self.hp = self.hp.saturating_sub(amount);
+        self.hp
+    }
+
+    pub(crate) fn heal(&mut self, amount: u64) -> u64 {
+        self.hp = self.hp.saturating_add(amount).min(self.max_hp);
         self.hp
     }
 
@@ -75,25 +90,25 @@ mod tests {
     fn test_player_hp_modification() {
         let mut player = Player::new("Test".to_string(), 100, 15);
 
-        // Test damage
+        // 伤害
         player.modify_hp(-30);
         assert_eq!(player.hp(), 70);
         assert!(player.is_alive());
 
-        // Test healing
+        // 治疗
         player.modify_hp(20);
         assert_eq!(player.hp(), 90);
 
-        // Test healing beyond max
+        // 治疗溢出按上限截断
         player.modify_hp(20);
         assert_eq!(player.hp(), 100);
 
-        // Test fatal damage
+        // 致命伤害
         player.modify_hp(-100);
         assert_eq!(player.hp(), 0);
         assert!(!player.is_alive());
 
-        // Test damage to dead player
+        // 对已死亡玩家继续伤害
         player.modify_hp(-10);
         assert_eq!(player.hp(), 0);
     }

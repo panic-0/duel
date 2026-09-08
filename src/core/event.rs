@@ -1,9 +1,28 @@
 use super::PlayerId;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Checkpoint {
+    DuelStart,
+    RoundStart,
+    TurnStart,
+    ActionEnd,
+    TurnEnd,
+    RoundEnd,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Event {
-    // State events
+    // 状态事件
     DuelStart,
+    HpChanged {
+        target_id: PlayerId,
+        old_hp: u64,
+        new_hp: u64,
+    },
+    Checkpoint {
+        phase: Checkpoint,
+        round: Option<u32>,
+    },
     RoundStart {
         round: u32,
     },
@@ -23,7 +42,7 @@ pub enum Event {
         round: u32,
     },
 
-    // Action events
+    // 行为事件
     BeforePlayerAttack {
         source_id: PlayerId,
         target_id: PlayerId,
@@ -45,15 +64,17 @@ pub enum Event {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
-    // State events
+    // 状态事件
     DuelStart,
+    HpChanged,
+    Checkpoint,
     RoundStart,
     BeforeTurn,
     Turn,
     AfterTurn,
     RoundEnd,
 
-    // Action events
+    // 行为事件
     BeforePlayerAttack,
     PlayerAttack,
     AfterPlayerAttack,
@@ -65,6 +86,8 @@ impl Event {
     pub fn event_type(&self) -> EventType {
         match self {
             Event::DuelStart => EventType::DuelStart,
+            Event::HpChanged { .. } => EventType::HpChanged,
+            Event::Checkpoint { .. } => EventType::Checkpoint,
             Event::RoundStart { .. } => EventType::RoundStart,
             Event::BeforeTurn { .. } => EventType::BeforeTurn,
             Event::Turn { .. } => EventType::Turn,

@@ -1,103 +1,102 @@
-use super::super::command::{AddBuff, ApplyEvent, RemoveBuff};
+use super::super::event::Event;
 use super::super::log::LogEntry;
-use super::super::modifier::HpModifier;
+use super::super::operation::{
+    skipped, Damage, ExecutionContext, Operation, OperationError, OperationResult,
+};
 use super::super::state::GameState;
 use super::*;
 
 #[derive(Debug)]
 pub struct Attack;
 
-impl Attack {
-    fn get_target(&self, source_id: PlayerId, world: &GameState) -> Option<PlayerId> {
-        world.get_next_player_around(source_id)
+#[derive(Debug, Clone, Copy)]
+pub struct AttackOperation {
+    pub source_id: PlayerId,
+}
+
+impl AttackOperation {
+    pub fn new(source_id: PlayerId) -> Self {
+        Self { source_id }
     }
 }
 
-#[derive(Debug)]
-struct AttackBuff {
+/// 默认普攻规则：来源与目标在伤害提交前都有效，攻击才继续。
+fn combatants_valid(
+    context: &ExecutionContext<'_>,
     source_id: PlayerId,
     target_id: PlayerId,
+) -> bool {
+    context
+        .state()
+        .get_player(source_id)
+        .is_some_and(|p| p.is_alive())
+        && context
+            .state()
+            .get_player(target_id)
+            .is_some_and(|p| p.is_alive())
 }
 
-impl Buff for AttackBuff {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![
-            (EventType::BeforePlayerAttack, Priority::Default),
-            (EventType::PlayerAttack, Priority::Resolve),
-        ]
-    }
-
-    fn on_event(
-        &mut self,
-        event: &mut Event,
-        world: &GameState,
-        commands: &mut Commands,
-        buff_id: BuffId,
-    ) {
-        match *event {
-            Event::BeforePlayerAttack {
-                source_id,
-                target_id,
-            } => {
-                if source_id != self.source_id || target_id != self.target_id {
-                    return;
-                }
-                let Some(source) = world.get_player(self.source_id) else {
-                    return;
-                };
-
-                commands.push(ApplyEvent {
-                    event: Event::PlayerAttack {
-                        source_id,
-                        target_id,
-                        damage: source.attack(),
-                    },
-                });
-            }
-            Event::PlayerAttack {
-                source_id,
-                target_id,
-                damage,
-            } => {
-                if source_id != self.source_id || target_id != self.target_id {
-                    return;
-                }
-
-                commands.push(RemoveBuff { id: buff_id });
-                world.log(LogEntry::Attack {
-                    source_id,
-                    target_id,
-                });
-                commands.push(HpModifier::damage(target_id, damage));
-
-                commands.push(ApplyEvent {
-                    event: Event::AfterPlayerAttack {
-                        source_id,
-                        target_id,
-                        damage,
-                    },
-                });
-            }
-            _ => {}
+impl Operation for AttackOperation {
+    fn execute(
+        self: Box<Self>,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<(OperationResult, Option<Box<dyn std::any::Any>>), OperationError> {
+        let Some(source) = context.state().get_player(self.source_id) else {
+            return skipped();
+        };
+        if !source.is_alive() {
+            return skipped();
         }
+        let Some(target_id) = context.state().get_next_player_around(self.source_id) else {
+            return skipped();
+        };
+        context.try_publish(Event::BeforePlayerAttack {
+            source_id: self.source_id,
+            target_id,
+        })?;
+        // 攻击开始反应（陷阱、救回等）完成后，按当前状态重新检查双方资格。
+        if !combatants_valid(context, self.source_id, target_id) {
+            return Ok((OperationResult::Skipped, None));
+        }
+        let amount = context
+            .state()
+            .get_player(self.source_id)
+            .map(|p| p.attack())
+            .unwrap_or(0);
+        context.log(LogEntry::Attack {
+            source_id: self.source_id,
+            target_id,
+        });
+        context.try_publish(Event::PlayerAttack {
+            source_id: self.source_id,
+            target_id,
+            damage: amount,
+        })?;
+        // 最后一个提交前反应点：PlayerAttack 的响应仍可能改变资格。
+        if !combatants_valid(context, self.source_id, target_id) {
+            return Ok((OperationResult::Skipped, None));
+        }
+        let damage = Damage::new(Some(self.source_id), target_id, amount);
+        let (_, value) = context.execute(damage)?;
+        // 没有提交结果就不伪造成功伤害通知。
+        let Some(change) = value
+            .as_deref()
+            .and_then(|value| value.downcast_ref::<super::super::operation::HpChange>())
+            .copied()
+        else {
+            return Ok((OperationResult::Skipped, None));
+        };
+        context.try_publish(Event::AfterPlayerAttack {
+            source_id: self.source_id,
+            target_id,
+            damage: change.submitted_amount,
+        })?;
+        Ok((OperationResult::Completed, Some(Box::new(change))))
     }
 }
 
 impl Ability for Attack {
-    fn apply(&self, source_id: PlayerId, world: &GameState, commands: &mut Commands) {
-        if let Some(target_id) = self.get_target(source_id, world) {
-            commands.push(AddBuff {
-                buff: Box::new(AttackBuff {
-                    source_id,
-                    target_id,
-                }),
-            });
-            commands.push(ApplyEvent {
-                event: Event::BeforePlayerAttack {
-                    source_id,
-                    target_id,
-                },
-            });
-        }
+    fn operation(&self, source_id: PlayerId, _world: &GameState) -> Option<Box<dyn Operation>> {
+        Some(Box::new(AttackOperation::new(source_id)))
     }
 }
