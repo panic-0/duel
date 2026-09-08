@@ -8,6 +8,7 @@ use super::super::{
     PlayerId,
 };
 use super::damage::Damage;
+use super::taunt;
 
 #[derive(Debug)]
 pub struct Attack;
@@ -50,7 +51,10 @@ impl Operation for AttackOperation {
         if !source.is_alive() {
             return skipped();
         }
-        let Some(target_id) = context.state().get_next_player_around(self.source_id) else {
+        let target_id = taunt::target(&context.query())
+            .filter(|id| *id != self.source_id)
+            .or_else(|| context.state().get_next_player_around(self.source_id));
+        let Some(target_id) = target_id else {
             return skipped();
         };
         context.try_publish(Event::BeforePlayerAttack {

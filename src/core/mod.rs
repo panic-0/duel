@@ -35,4 +35,5 @@ pub use business::death::DeathOperation;
 pub use business::flow::{DuelOperation, DuelRunner, RoundOperation, TurnOperation};
 pub use business::heal::{Heal, HpModifier};
 pub use business::install_default_rules;
-pub use business::skills::{Abilities, Ability};
+pub use business::skills::{Abilities, Ability, Combo, ComboOperation};
+pub use business::taunt::{add_taunt, TauntData};

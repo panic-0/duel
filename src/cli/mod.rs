@@ -5,35 +5,44 @@ mod log;
 
 use builder::GameBuilder;
 use duel::core::{
+    add_taunt,
     business::{damage_reduction, revival},
     log::Logger,
-    Abilities, Attack, DuelRunner,
+    Abilities, Attack, Combo, DuelRunner,
 };
 use log::print_log;
 
 pub(crate) fn run() {
     let builder = GameBuilder::new();
-    let (builder, player1_id) = builder.add_player("Player1", 15, 10);
-    let (builder, player2_id) = builder.add_player("Player2", 28, 8);
+    let (builder, guardian_id) = builder.add_player("Guardian", 32, 3);
+    let (builder, berserker_id) = builder.add_player("Berserker", 24, 5);
+    let (builder, duelist_id) = builder.add_player("Duelist", 20, 4);
     let mut world = builder.build();
 
-    // 技能集合是数据实例，owner 随玩家销毁。
+    // 守护者有普通攻击；狂战士一次行动连续攻击两次；决斗者使用普通攻击。
     world.add_data(
-        Some(player1_id),
-        Abilities::new(player1_id, vec![Box::new(Attack)]),
+        Some(guardian_id),
+        Abilities::new(guardian_id, vec![Box::new(Attack)]),
     );
     world.add_data(
-        Some(player2_id),
-        Abilities::new(player2_id, vec![Box::new(Attack)]),
+        Some(berserker_id),
+        Abilities::new(berserker_id, vec![Box::new(Combo::new(2))]),
+    );
+    world.add_data(
+        Some(duelist_id),
+        Abilities::new(duelist_id, vec![Box::new(Attack)]),
     );
 
-    // 救回：System 注册一次，实例按玩家添加。
+    // 守护者吸引攻击；其 owner 死亡时，嘲讽数据会随生命周期一起销毁。
+    add_taunt(&mut world, guardian_id);
+
+    // 救回：System 注册一次，实例按玩家添加。守护者死亡后会恢复一半生命。
     revival::register_revival_system(&mut world);
-    revival::add_revival(&mut world, player1_id);
+    revival::add_revival(&mut world, guardian_id);
 
-    // 减伤：owner 与 target 都指向 Player2；跨角色示例见回归测试。
+    // 减伤：守护者受到的伤害降低 25%。
     damage_reduction::register_damage_reduction_rule(&mut world);
-    damage_reduction::add_damage_reduction(&mut world, player2_id, player2_id, 0.2);
+    damage_reduction::add_damage_reduction(&mut world, guardian_id, guardian_id, 0.25);
 
     duel::core::install_default_rules(&mut world);
 

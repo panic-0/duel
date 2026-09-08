@@ -9,6 +9,7 @@ pub mod flow;
 pub mod heal;
 pub mod revival;
 pub mod skills;
+pub mod taunt;
 pub mod victory;
 
 use super::world::World;
