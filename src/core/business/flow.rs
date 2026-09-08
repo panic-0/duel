@@ -115,6 +115,16 @@ impl Operation for TurnOperation {
         // 游标记录“已执行的最远技能槽位”，保证资格变化不错位。
         let mut executed: Option<(BuffId, usize)> = None;
         while !context.is_end() {
+            // 行动资格在每次选择前重新判断：Turn 通知的反应或前一个
+            // 正常行动都可能使持有者死亡——死者不得再获得新的正常行动，
+            // 技能数据仍然存活也不代表持有资格成立。
+            if !context
+                .state()
+                .get_player(self.player_id)
+                .is_some_and(|player| player.is_alive())
+            {
+                break;
+            }
             let Some(next) = self.next_action(context, executed) else {
                 break;
             };

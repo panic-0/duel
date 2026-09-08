@@ -43,6 +43,9 @@ pub enum Event {
     },
 
     // 行为事件
+    // 注意：攻击类事件中的 target_id 均指“本次攻击最初选定的目标”，
+    // 即使后续参数规则把实际伤害重定向到他人也不改写；
+    // 实际承受伤害的角色以 Damage 提交返回的 HpChange.target_id 为准。
     BeforePlayerAttack {
         source_id: PlayerId,
         target_id: PlayerId,
