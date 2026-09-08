@@ -2,9 +2,10 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
-use super::event::Checkpoint;
-use super::flow::GameResult;
-use super::{event::Event, state::GameState, world::World};
+use super::buff_data::{BuffData, DestructionReason};
+use super::query::Query;
+use super::world::World;
+use super::{event::Event, state::GameState, BuffId, PlayerId};
 
 /// 操作返回的值。在执行器边界做类型擦除，让互不相关的操作共用同一个迭代工作栈。
 pub type OperationValue = Box<dyn Any>;
@@ -90,8 +91,9 @@ impl<'a> ExecutionContext<'a> {
         self.world.state_view()
     }
 
-    pub fn world(&self) -> &GameState {
-        self.state()
+    /// 只读查询视图：玩家状态、数据实例与扩展资源。
+    pub fn query(&self) -> Query<'_> {
+        self.world.query()
     }
 
     /// 发布事件并等待其全部响应完成。错误记入世界后本调用继续返回；
@@ -131,65 +133,86 @@ impl<'a> ExecutionContext<'a> {
         self.world.is_end()
     }
 
-    pub fn end_game(&mut self, result: GameResult) {
-        self.world.end_game(result);
+    /// 结束对局。已终局时重复调用为无副作用成功。
+    pub fn end_game(&mut self, result: super::world::GameResult) -> Result<(), OperationError> {
+        self.world.end_game(result)
     }
 
-    /// 查询该玩家在 `after`（已执行的最远技能槽位）之后的下一个正常行动。
-    /// 每次调用都按当前状态重新收集；槽位是稳定身份，可用性变化不会让游标错位。
-    pub fn normal_action_after(
-        &mut self,
-        player_id: super::PlayerId,
-        after: Option<(super::BuffId, usize)>,
-    ) -> Option<((super::BuffId, usize), Box<dyn Operation>)> {
-        self.world.normal_action_after(player_id, after)
+    /// 中性关联提交：本组变化全部写入后才按约定顺序开放通知。
+    pub fn submit(&mut self, changes: ChangeSet) -> Result<SubmissionResult, OperationError> {
+        self.world.submit(changes)
     }
 
-    /// 提交一次生命修改并完成其事件响应。
+    /// 提交一次生命修改（单条中性变化）并完成其事件响应。
     /// `Ok(None)` 表示目标不存在（可解释的跳过）；`Err` 表示响应链失败且已记录。
     pub fn modify_hp(
         &mut self,
-        target_id: super::PlayerId,
+        target_id: PlayerId,
         modifier: i64,
     ) -> Result<Option<HpChange>, OperationError> {
-        self.world.modify_hp_from_operation(target_id, modifier)
+        let changes = ChangeSet::new().hp(target_id, modifier);
+        Ok(self.world.submit(changes)?.hp)
     }
-
-    /// 提交一次伤害（含参数修改与声明的消耗）并完成其事件响应。
-    pub fn submit_damage(
+    /// 注册一份数据实例，返回稳定身份；销毁事实由后续提交产生。
+    pub fn add_data(
         &mut self,
-        damage: DamageContext,
-    ) -> Result<Option<HpChange>, OperationError> {
-        self.world.submit_damage(damage)
+        owner: Option<PlayerId>,
+        data: impl BuffData + 'static,
+    ) -> Result<BuffId, OperationError> {
+        self.world.check_operation_failed()?;
+        Ok(self.world.add_data(owner, data))
     }
 
-    /// 提交一次治疗并完成其事件响应。
-    pub fn submit_heal(
+    /// 显式移除一份数据实例并分发对应原因的销毁事实。
+    pub fn remove_data(
         &mut self,
-        target_id: super::PlayerId,
-        amount: u64,
-    ) -> Result<Option<HpChange>, OperationError> {
-        self.world.submit_heal(target_id, amount)
+        id: BuffId,
+        reason: DestructionReason,
+    ) -> Result<bool, OperationError> {
+        let changes = ChangeSet::new().destroy(id, reason);
+        let result = self.world.submit(changes)?;
+        Ok(result.destroyed.iter().any(|d| d.buff_id == id))
     }
 
-    pub fn add_player(&mut self, player: super::player::Player) -> super::PlayerId {
-        self.world.add_player(player)
+    pub fn add_player(
+        &mut self,
+        player: super::player::Player,
+    ) -> Result<PlayerId, OperationError> {
+        self.world.check_operation_failed()?;
+        Ok(self.world.add_player(player))
     }
 
-    pub fn remove_player(&mut self, id: super::PlayerId) -> Option<super::player::Player> {
-        self.world.remove_player(id)
+    pub fn remove_player(
+        &mut self,
+        id: PlayerId,
+    ) -> Result<Option<super::player::Player>, OperationError> {
+        self.world.check_operation_failed()?;
+        Ok(self.world.take_player(id))
     }
 
-    pub fn add_buff(&mut self, buff: Box<dyn super::buff::Buff>) -> super::BuffId {
-        self.world.add_buff(buff)
+    /// 按身份读取数据实例。
+    pub fn data<T: BuffData>(&self, id: BuffId) -> Option<&T> {
+        self.query().data::<T>(id)
     }
 
-    pub fn remove_buff(&mut self, id: super::BuffId) -> Option<Box<dyn super::buff::Buff>> {
-        self.world.remove_buff(id)
+    /// 写入（替换）一个中性扩展资源；业务类型与解释逻辑留在业务模块。
+    pub fn set_resource<T: Any>(&mut self, value: T) {
+        self.world.set_resource(value);
     }
 
-    pub(crate) fn cleanup_owned_buffs(&mut self, player_id: super::PlayerId) {
-        self.world.cleanup_owned_buffs(player_id);
+    /// 可变访问一个中性扩展资源。
+    pub fn resource_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.world.resource_mut::<T>()
+    }
+
+    /// 只读访问一个中性扩展资源。
+    pub fn resource<T: Any>(&self) -> Option<&T> {
+        self.world.resource::<T>()
+    }
+
+    /// 可变访问一个中性扩展资源，不存在时以默认值插入。
+    pub fn resource_mut_or_default<T: Any + Default>(&mut self) -> &mut T {
+        self.world.resource_mut_or_insert_with(T::default)
     }
 
     pub fn spawn<O: Operation>(&mut self, operation: O) {
@@ -203,7 +226,7 @@ impl<'a> ExecutionContext<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HpChange {
-    pub target_id: super::PlayerId,
+    pub target_id: PlayerId,
     pub old_hp: u64,
     pub new_hp: u64,
     pub max_hp: u64,
@@ -212,99 +235,81 @@ pub struct HpChange {
     pub submitted_amount: u64,
 }
 
-/// 一次伤害的参数草稿。修改回调只调整这里的数据并声明消耗，
-/// 提交与消耗由执行器的受控提交统一处理。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DamageContext {
-    pub source_id: Option<super::PlayerId>,
-    pub target_id: super::PlayerId,
-    pub amount: u64,
-    /// 本次提交成功时需要消耗的机会（例如移除一次性护盾 Buff）。
-    consumption: Vec<super::BuffId>,
+/// 一次关联提交的候选变化。全部变化在同一个提交边界内写入，
+/// 期间不运行玩法响应；随后按“基础状态事实 → 销毁事实”顺序通知。
+#[derive(Debug, Default)]
+pub struct ChangeSet {
+    pub(crate) hp: Option<HpRequest>,
+    pub(crate) remove_player: Option<PlayerId>,
+    pub(crate) destroy: Vec<(BuffId, DestructionReason)>,
 }
 
-impl DamageContext {
-    pub fn new(
-        source_id: Option<super::PlayerId>,
-        target_id: super::PlayerId,
-        amount: u64,
-    ) -> Self {
-        Self {
-            source_id,
-            target_id,
-            amount,
-            consumption: Vec::new(),
-        }
-    }
-
-    pub fn reduce_to(&mut self, amount: u64) {
-        self.amount = amount.min(self.amount);
-    }
-
-    /// 声明本次提交成功时消耗一次机会；执行器在提交后、通知反应前统一处理。
-    pub fn consume_buff(&mut self, buff_id: super::BuffId) {
-        self.consumption.push(buff_id);
-    }
-
-    pub(crate) fn take_consumption(&mut self) -> Vec<super::BuffId> {
-        std::mem::take(&mut self.consumption)
-    }
+/// 无符号的生命变化请求；伤害与治疗分别走有界无符号计算。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HpRequest {
+    Damage(PlayerId, u64),
+    Heal(PlayerId, u64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Damage {
-    pub context: DamageContext,
-}
-
-impl Damage {
-    pub fn new(
-        source_id: Option<super::PlayerId>,
-        target_id: super::PlayerId,
-        amount: u64,
-    ) -> Self {
-        Self {
-            context: DamageContext::new(source_id, target_id, amount),
-        }
+impl ChangeSet {
+    pub fn new() -> Self {
+        Self::default()
     }
-}
 
-impl Operation for Damage {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        let Some(change) = context.submit_damage(self.context)? else {
-            return skipped();
-        };
-        completed_with(change)
+    /// 生命变化（正数治疗、负数伤害）。
+    pub fn hp(mut self, target_id: PlayerId, modifier: i64) -> Self {
+        self.hp = Some(if modifier < 0 {
+            HpRequest::Damage(target_id, modifier.unsigned_abs())
+        } else {
+            HpRequest::Heal(target_id, modifier as u64)
+        });
+        self
+    }
+
+    /// 直接以无符号数值声明伤害，避免大数符号转换。
+    pub fn damage(mut self, target_id: PlayerId, amount: u64) -> Self {
+        self.hp = Some(HpRequest::Damage(target_id, amount));
+        self
+    }
+
+    /// 直接以无符号数值声明治疗。
+    pub fn heal(mut self, target_id: PlayerId, amount: u64) -> Self {
+        self.hp = Some(HpRequest::Heal(target_id, amount));
+        self
+    }
+
+    /// 移除一名角色；其 owner 依赖的数据实例随同次提交销毁（原因 OwnerDeath）。
+    pub fn remove_player(mut self, id: PlayerId) -> Self {
+        self.remove_player = Some(id);
+        self
+    }
+
+    /// 销毁一份数据实例并产生销毁事实。
+    pub fn destroy(mut self, id: BuffId, reason: DestructionReason) -> Self {
+        self.destroy.push((id, reason));
+        self
     }
 }
 
+/// 一份被销毁实例的元信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Heal {
-    pub target_id: super::PlayerId,
-    pub amount: u64,
+pub struct DestroyedInfo {
+    pub buff_id: BuffId,
+    pub owner: Option<PlayerId>,
+    pub reason: DestructionReason,
 }
 
-impl Heal {
-    pub fn new(target_id: super::PlayerId, amount: u64) -> Self {
-        Self { target_id, amount }
-    }
+#[derive(Debug, Default)]
+pub struct SubmissionResult {
+    /// 生命变化结果；未声明或目标不存在时为 `None`。
+    pub hp: Option<HpChange>,
+    /// 声明的角色移除是否实际发生。
+    pub player_removed: bool,
+    /// 本组提交销毁的全部实例，按 BuffId 升序。
+    pub destroyed: Vec<DestroyedInfo>,
 }
 
-impl Operation for Heal {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        let Some(change) = context.submit_heal(self.target_id, self.amount)? else {
-            return skipped();
-        };
-        completed_with(change)
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EmitEvent(pub Event);
 
 impl Operation for EmitEvent {
@@ -325,20 +330,20 @@ impl Operation for AddPlayerOperation {
         self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        context.add_player(self.0);
+        context.add_player(self.0)?;
         completed()
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct RemovePlayerOperation(pub super::PlayerId);
+pub struct RemovePlayerOperation(pub PlayerId);
 
 impl Operation for RemovePlayerOperation {
     fn execute(
         self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        if context.remove_player(self.0).is_some() {
+        if context.remove_player(self.0)?.is_some() {
             completed()
         } else {
             skipped()
@@ -347,223 +352,20 @@ impl Operation for RemovePlayerOperation {
 }
 
 #[derive(Debug)]
-pub struct AddBuffOperation(pub Box<dyn super::buff::Buff>);
-
-impl Operation for AddBuffOperation {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        context.add_buff(self.0);
-        completed()
-    }
+pub struct RemoveDataOperation {
+    pub buff_id: BuffId,
+    pub reason: DestructionReason,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RemoveBuffOperation(pub super::BuffId);
-
-impl Operation for RemoveBuffOperation {
+impl Operation for RemoveDataOperation {
     fn execute(
         self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        if context.remove_buff(self.0).is_some() {
+        if context.remove_data(self.buff_id, self.reason)? {
             completed()
         } else {
             skipped()
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DeathOperation {
-    pub player_id: super::PlayerId,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DuelOperation {
-    pub max_rounds: u32,
-}
-
-impl DuelOperation {
-    pub fn new(max_rounds: u32) -> Self {
-        Self { max_rounds }
-    }
-}
-
-/// 发布胜负检查点；终局判断由全局胜负 Buff 在检查点上作出。
-fn run_checkpoint(
-    context: &mut ExecutionContext<'_>,
-    phase: Checkpoint,
-    round: Option<u32>,
-) -> Result<(), OperationError> {
-    context.try_publish(Event::Checkpoint { phase, round })
-}
-
-/// 一个完整回合：回合开始通知、按座次逐个执行玩家的 Turn、轮末通知与检查点。
-/// 终局确认后不再补执行剩余的轮末效果。
-#[derive(Debug, Clone, Copy)]
-pub struct RoundOperation {
-    pub round: u32,
-}
-
-impl Operation for RoundOperation {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        context.try_publish(Event::RoundStart { round: self.round })?;
-        run_checkpoint(context, Checkpoint::RoundStart, Some(self.round))?;
-        if context.is_end() {
-            return completed();
-        }
-        let mut current = context
-            .state()
-            .get_players()
-            .iter()
-            .find(|(_, player)| player.is_alive())
-            .map(|(id, _)| *id);
-        while let Some(player_id) = current {
-            context.execute(TurnOperation {
-                round: self.round,
-                player_id,
-            })?;
-            if context.is_end() {
-                break;
-            }
-            current = context.state().get_next_player_not_around(player_id);
-        }
-        if context.is_end() {
-            return completed();
-        }
-        context.try_publish(Event::RoundEnd { round: self.round })?;
-        run_checkpoint(context, Checkpoint::RoundEnd, Some(self.round))?;
-        completed()
-    }
-}
-
-/// 一名玩家的一次正常回合：回合通知与反应、逐个正常行动、回合收尾。
-///
-/// 正常行动由本流程按当前状态逐个向该玩家的技能集合查询并等待完成；
-/// 游标是稳定的技能槽位，技能中途失效不会让后续技能被跳过。
-/// 每个行动及其全部反应完成后发布 ActionEnd 检查点，已终局则不再安排后续行动。
-#[derive(Debug, Clone, Copy)]
-pub struct TurnOperation {
-    pub round: u32,
-    pub player_id: super::PlayerId,
-}
-
-impl Operation for TurnOperation {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        context.try_publish(Event::BeforeTurn {
-            round: self.round,
-            player_id: self.player_id,
-        })?;
-        run_checkpoint(context, Checkpoint::TurnStart, Some(self.round))?;
-        if context.is_end() {
-            return completed();
-        }
-        if !context
-            .state()
-            .get_player(self.player_id)
-            .is_some_and(|player| player.is_alive())
-        {
-            return completed();
-        }
-        context.try_publish(Event::Turn {
-            round: self.round,
-            player_id: self.player_id,
-        })?;
-        let mut executed: Option<(super::BuffId, usize)> = None;
-        while !context.is_end() {
-            let Some((slot, action)) = context.normal_action_after(self.player_id, executed) else {
-                break;
-            };
-            context.execute_boxed(action)?;
-            executed = Some(slot);
-            run_checkpoint(context, Checkpoint::ActionEnd, Some(self.round))?;
-        }
-        if context.is_end() {
-            return completed();
-        }
-        context.try_publish(Event::AfterTurn {
-            round: self.round,
-            player_id: self.player_id,
-        })?;
-        run_checkpoint(context, Checkpoint::TurnEnd, Some(self.round))?;
-        completed()
-    }
-}
-
-impl Operation for DuelOperation {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        context.try_publish(Event::DuelStart)?;
-        run_checkpoint(context, Checkpoint::DuelStart, None)?;
-        if self.max_rounds == 0 && !context.is_end() {
-            context.end_game(GameResult::Draw);
-        }
-
-        let mut round = 1;
-        while !context.is_end() && round <= self.max_rounds {
-            context.execute(RoundOperation { round })?;
-            if !context.is_end() && round >= self.max_rounds {
-                context.end_game(GameResult::Draw);
-            }
-            round += 1;
-        }
-        completed()
-    }
-}
-
-impl DeathOperation {
-    /// 死亡确认：死亡前通知、按当前状态重新判断、提交与清理。
-    fn settle(
-        player_id: super::PlayerId,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        context.try_publish(Event::BeforePlayerDeath(player_id))?;
-        let Some(player) = context.state().get_player(player_id) else {
-            return skipped();
-        };
-        if player.hp() != 0 {
-            return skipped();
-        }
-        context.log(super::log::LogEntry::Death { player_id });
-        context.remove_player(player_id);
-        context.try_publish(Event::AfterPlayerDeath(player_id))?;
-        context.cleanup_owned_buffs(player_id);
-        completed()
-    }
-}
-
-impl Operation for DeathOperation {
-    fn execute(
-        self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
-    ) -> Result<OperationOutcome, OperationError> {
-        let player_id = self.player_id;
-        // 同一次死亡只进入一次死亡前流程；嵌套的重复请求直接跳过。
-        if context.world.pending_deaths.contains(&player_id) {
-            return skipped();
-        }
-        let Some(player) = context.state().get_player(player_id) else {
-            return skipped();
-        };
-        if player.hp() != 0 {
-            return skipped();
-        }
-        context.world.pending_deaths.push(player_id);
-        let outcome = Self::settle(player_id, context);
-        context
-            .world
-            .pending_deaths
-            .retain(|&pending| pending != player_id);
-        outcome
     }
 }

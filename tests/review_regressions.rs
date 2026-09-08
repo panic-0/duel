@@ -1,21 +1,28 @@
-//! 第一轮审查回归测试：断言定稿协议（N1A/C1A/C3A/C4A、错误传播、归属过滤、
-//! 数值方向）以及设计审计表的关键场景。随仓库一起编译并参与 `cargo test`。
+//! 第一轮审查回归测试：断言定稿协议（N1A/C1A/C3A/C4A、错误传播、数值方向）
+//! 以及设计审计表的关键场景。owner 过滤断言已按新语义撤回，
+//! 跨角色生命周期用例见 review_v3_regressions。
+
+use std::{cell::Cell, rc::Rc};
 
 use duel::core::{
-    ability::{Abilities, Ability, AttackOperation},
-    buff::{Buff, DamageReduction, Priority, Revival},
+    buff_data::DestructionReason,
+    business::{
+        damage::{register_damage_rule, Damage, DamageContext, DamageRule},
+        damage_reduction::{add_damage_reduction, register_damage_reduction_rule},
+        revival::{add_revival, register_revival_system, RevivalData},
+        skills::{Abilities, Ability},
+    },
     event::{Checkpoint, Event, EventType},
+    install_default_rules,
     operation::{
-        completed, completed_with, Damage, DamageContext, DeathOperation, EmitEvent,
-        ExecutionContext, Heal, HpChange, Operation, OperationError, OperationOutcome,
-        RemoveBuffOperation,
+        completed, completed_with, EmitEvent, ExecutionContext, HpChange, Operation,
+        OperationError, OperationOutcome, RemoveDataOperation,
     },
     player::Player,
     state::GameState,
-    world::World,
-    BuffId, PlayerId,
+    system::{Fact, NoticeKind, Priority, Subject, System},
+    AttackOperation, BuffId, DeathOperation, DuelRunner, Heal, PlayerId, World,
 };
-use std::{cell::Cell, rc::Rc};
 
 fn checkpoint() -> Event {
     Event::Checkpoint {
@@ -38,12 +45,22 @@ impl Operation for CountOperation {
 
 #[derive(Debug)]
 struct CheckpointCounter(Rc<Cell<usize>>);
-impl Buff for CheckpointCounter {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::Checkpoint, Priority::Default)]
+impl System for CheckpointCounter {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
     }
-    fn operations(&mut self, _: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(CountOperation(self.0.clone()))]
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::Checkpoint { .. }))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        Ok(vec![Box::new(CountOperation(self.0.clone()))])
     }
 }
 
@@ -63,7 +80,7 @@ impl Operation for PublishThenRead {
 fn n1a_publish_finishes_reactions_before_returning_to_operation() {
     let mut world = World::new();
     let count = Rc::new(Cell::new(0));
-    world.add_buff(Box::new(CheckpointCounter(count.clone())));
+    world.add_system(CheckpointCounter(count.clone()));
     let (_, value) = world.execute(PublishThenRead(count)).expect("根操作");
     let observed = *value
         .expect("应读取到计数")
@@ -74,18 +91,31 @@ fn n1a_publish_finishes_reactions_before_returning_to_operation() {
 
 #[derive(Debug)]
 struct HealAfterDamage(PlayerId);
-impl Buff for HealAfterDamage {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::HpChanged, Priority::Default)]
+impl System for HealAfterDamage {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::HpChanged), Priority::Default)]
     }
-    fn operations(&mut self, event: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        match event {
-            Event::HpChanged {
-                target_id,
-                old_hp,
-                new_hp,
-            } if *target_id == self.0 && new_hp < old_hp => vec![Box::new(Heal::new(self.0, 3))],
-            _ => vec![],
+    fn candidates(&self, _fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        vec![Subject::Standalone]
+    }
+    fn respond(
+        &self,
+        fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        let Some(Event::HpChanged {
+            target_id,
+            old_hp,
+            new_hp,
+        }) = fact.event()
+        else {
+            return Ok(vec![]);
+        };
+        if *target_id == self.0 && new_hp < old_hp {
+            Ok(vec![Box::new(Heal::new(self.0, 3))])
+        } else {
+            Ok(vec![])
         }
     }
 }
@@ -110,7 +140,7 @@ impl Operation for DamageThenRead {
 fn c1a_hp_submission_returns_history_after_finishing_reactions() {
     let mut world = World::new();
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_buff(Box::new(HealAfterDamage(player)));
+    world.add_system(HealAfterDamage(player));
     let (_, value) = world.execute(DamageThenRead(player)).expect("根操作");
     let observed = *value
         .expect("应读取到生命值")
@@ -119,27 +149,55 @@ fn c1a_hp_submission_returns_history_after_finishing_reactions() {
     assert_eq!(observed, (6, 9), "历史值应为 6，当前值应包含治疗反应");
 }
 
+/// 空数据实例标记，用于验证 C3A 的新增实例语义。
 #[derive(Debug)]
-struct PublishThenAdd(Rc<Cell<usize>>);
+struct MarkerData;
+
+/// 为每个 Marker 实例产生候选并计数的 System。
+#[derive(Debug)]
+struct MarkerCounter(Rc<Cell<usize>>);
+impl System for MarkerCounter {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    }
+    fn candidates(&self, _fact: &Fact<'_>, query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        query
+            .instances::<MarkerData>()
+            .iter()
+            .map(|(id, _, _)| Subject::Instance(*id))
+            .collect()
+    }
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        self.0.set(self.0.get() + 1);
+        Ok(vec![])
+    }
+}
+
+#[derive(Debug)]
+struct PublishThenAdd;
 impl Operation for PublishThenAdd {
     fn execute(
         self: Box<Self>,
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         ctx.publish(checkpoint());
-        ctx.add_buff(Box::new(CheckpointCounter(self.0.clone())));
+        ctx.add_data(None, MarkerData)?;
         completed()
     }
 }
 
 #[test]
-fn n1a_and_c3a_later_added_buff_does_not_receive_previously_published_event() {
+fn n1a_and_c3a_later_added_instance_does_not_receive_previously_published_event() {
     let mut world = World::new();
     let count = Rc::new(Cell::new(0));
-    world
-        .execute(PublishThenAdd(count.clone()))
-        .expect("根操作");
-    assert_eq!(count.get(), 0, "新增 Buff 收到了在它创建之前发布的事件");
+    world.add_system(MarkerCounter(count.clone()));
+    world.execute(PublishThenAdd).expect("根操作");
+    assert_eq!(count.get(), 0, "新增数据实例收到了在它创建之前发布的通知");
 }
 
 #[derive(Debug)]
@@ -154,13 +212,23 @@ impl Operation for FailOperation {
 }
 
 #[derive(Debug)]
-struct FailingBuff;
-impl Buff for FailingBuff {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::Checkpoint, Priority::Default)]
+struct FailingSystem;
+impl System for FailingSystem {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
     }
-    fn operations(&mut self, _: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(FailOperation)]
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::Checkpoint { .. }))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        Ok(vec![Box::new(FailOperation)])
     }
 }
 
@@ -168,66 +236,43 @@ impl Buff for FailingBuff {
 fn inline_operation_error_reaches_root_and_stops_later_listeners() {
     let mut world = World::new();
     let count = Rc::new(Cell::new(0));
-    world.add_buff(Box::new(FailingBuff));
-    world.add_buff(Box::new(CheckpointCounter(count.clone())));
+    world.add_system(FailingSystem);
+    world.add_system(CheckpointCounter(count.clone()));
     let result = world.execute(EmitEvent(checkpoint()));
     assert!(result.is_err(), "嵌套 Err 被静默忽略");
     assert_eq!(count.get(), 0, "操作失败后更晚的监听者仍然运行了");
 }
 
-#[derive(Debug)]
-struct OwnedHpCounter {
-    owner: PlayerId,
-    count: Rc<Cell<usize>>,
-}
-impl Buff for OwnedHpCounter {
-    fn owner(&self) -> Option<PlayerId> {
-        Some(self.owner)
-    }
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::HpChanged, Priority::Default)]
-    }
-    fn operations(&mut self, _: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(CountOperation(self.count.clone()))]
-    }
-}
-
-#[test]
-fn owner_scope_filters_single_target_hp_events() {
-    let mut world = World::new();
-    let a = world.add_player(Player::new("A".into(), 10, 0));
-    let b = world.add_player(Player::new("B".into(), 10, 0));
-    let count = Rc::new(Cell::new(0));
-    world.add_buff(Box::new(OwnedHpCounter {
-        owner: a,
-        count: count.clone(),
-    }));
-    world.execute(Damage::new(None, b, 1)).expect("伤害");
-    assert_eq!(count.get(), 0, "归属 A 的监听者收到了 B 的生命事件");
-}
-
+/// 自定义死亡判断：观察到零血角色的生命变化后提出 Death。
 #[derive(Debug)]
 struct GlobalDeathRule;
-impl Buff for GlobalDeathRule {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::HpChanged, Priority::Default)]
+impl System for GlobalDeathRule {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::HpChanged), Priority::Default)]
     }
-    fn operations(
-        &mut self,
-        event: &Event,
-        state: &GameState,
-        _: BuffId,
-    ) -> Vec<Box<dyn Operation>> {
-        match event {
-            Event::HpChanged { target_id, .. }
-                if state.get_player(*target_id).is_some_and(|p| p.hp() == 0) =>
-            {
-                vec![Box::new(DeathOperation {
-                    player_id: *target_id,
-                })]
-            }
-            _ => vec![],
+    fn candidates(&self, fact: &Fact<'_>, query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        if !matches!(fact.event(), Some(Event::HpChanged { .. })) {
+            return Vec::new();
         }
+        if query.state().get_players().values().any(|p| p.hp() == 0) {
+            vec![Subject::Standalone]
+        } else {
+            Vec::new()
+        }
+    }
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        Ok(query
+            .state()
+            .get_players()
+            .iter()
+            .filter(|(_, p)| p.hp() == 0)
+            .map(|(&id, _)| Box::new(DeathOperation { player_id: id }) as Box<dyn Operation>)
+            .collect())
     }
 }
 
@@ -235,8 +280,9 @@ impl Buff for GlobalDeathRule {
 fn ordinary_death_operation_preserves_before_death_rescue_when_triggered_by_global_rule() {
     let mut world = World::new();
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_buff(Box::new(GlobalDeathRule));
-    world.add_buff(Box::new(Revival::new(player)));
+    world.add_system(GlobalDeathRule);
+    register_revival_system(&mut world);
+    add_revival(&mut world, player);
     world
         .execute(Damage::new(None, player, 10))
         .expect("致命伤害");
@@ -262,29 +308,35 @@ impl Operation for EndOperation {
         self: Box<Self>,
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.end_game(duel::core::flow::GameResult::Draw);
+        ctx.end_game(duel::core::GameResult::Draw)?;
         completed()
     }
 }
 
 #[derive(Debug)]
 struct EndAtFirstActionCheckpoint;
-impl Buff for EndAtFirstActionCheckpoint {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::Checkpoint, Priority::Default)]
+impl System for EndAtFirstActionCheckpoint {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
     }
-    fn operations(&mut self, event: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        if matches!(
-            event,
-            Event::Checkpoint {
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(
+            fact.event(),
+            Some(Event::Checkpoint {
                 phase: Checkpoint::ActionEnd,
                 ..
-            }
-        ) {
-            vec![Box::new(EndOperation)]
-        } else {
-            vec![]
-        }
+            })
+        )
+        .then(|| vec![Subject::Standalone])
+        .unwrap_or_default()
+    }
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        Ok(vec![Box::new(EndOperation)])
     }
 }
 
@@ -294,14 +346,14 @@ fn c4a_checkpoint_between_normal_abilities_stops_second_ability() {
     let a = world.add_player(Player::new("A".into(), 10, 0));
     world.add_player(Player::new("B".into(), 10, 0));
     let count = Rc::new(Cell::new(0));
-    world.add_buff(Box::new(Abilities::new(
-        a,
-        vec![
+    world.add_data(
+        Some(a),
+        Abilities::new(vec![
             Box::new(CountingAbility(count.clone())),
             Box::new(CountingAbility(count.clone())),
-        ],
-    )));
-    world.add_buff(Box::new(EndAtFirstActionCheckpoint));
+        ]),
+    );
+    world.add_system(EndAtFirstActionCheckpoint);
     world.run_with_max_rounds(1).expect("对局应正常结束");
     assert_eq!(
         count.get(),
@@ -340,15 +392,28 @@ fn maximum_unsigned_heal_must_not_become_damage() {
 
 #[derive(Debug)]
 struct AttackDamageObserver(Rc<Cell<u64>>);
-impl Buff for AttackDamageObserver {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::AfterPlayerAttack, Priority::Default)]
+impl System for AttackDamageObserver {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(
+            NoticeKind::Event(EventType::AfterPlayerAttack),
+            Priority::Default,
+        )]
     }
-    fn operations(&mut self, event: &Event, _: &GameState, _: BuffId) -> Vec<Box<dyn Operation>> {
-        if let Event::AfterPlayerAttack { damage, .. } = event {
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::AfterPlayerAttack { .. }))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+    fn respond(
+        &self,
+        fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        if let Some(Event::AfterPlayerAttack { damage, .. }) = fact.event() {
             self.0.set(*damage);
         }
-        vec![]
+        Ok(vec![])
     }
 }
 
@@ -358,8 +423,9 @@ fn after_attack_damage_should_match_post_reduction_damage_for_non_overkill() {
     let a = world.add_player(Player::new("A".into(), 10, 8));
     let b = world.add_player(Player::new("B".into(), 20, 0));
     let reported = Rc::new(Cell::new(0));
-    world.add_buff(Box::new(DamageReduction::new(b, 0.25)));
-    world.add_buff(Box::new(AttackDamageObserver(reported.clone())));
+    register_damage_reduction_rule(&mut world);
+    add_damage_reduction(&mut world, b, b, 0.25);
+    world.add_system(AttackDamageObserver(reported.clone()));
     world.execute(AttackOperation::new(a)).expect("攻击");
     assert_eq!(world.get_player(b).expect("B 存活").hp(), 14);
     assert_eq!(reported.get(), 6, "通知携带的是减伤前的数值");
@@ -367,28 +433,47 @@ fn after_attack_damage_should_match_post_reduction_damage_for_non_overkill() {
 
 // —— 设计审计表场景 ——
 
-/// 一次性护盾：修改草稿时把伤害降为 0，并声明本次提交消耗自身。
-/// 回调只拿到 `&self`，消耗由受控提交统一处理。
+/// 一次性护盾：数据实例 + 业务规则。
+/// 规则把伤害草稿降为 0 并声明消耗；消耗由受控提交统一处理。
 #[derive(Debug)]
-struct OneShotShield {
+struct AuditShieldData {
     target_id: PlayerId,
 }
 
-impl Buff for OneShotShield {
-    fn owner(&self) -> Option<PlayerId> {
-        Some(self.target_id)
+#[derive(Debug)]
+struct AuditShieldRule;
+
+impl DamageRule for AuditShieldRule {
+    fn candidates(
+        &self,
+        context: &DamageContext,
+        query: &duel::core::query::Query<'_>,
+    ) -> Vec<Subject> {
+        query
+            .instances::<AuditShieldData>()
+            .iter()
+            .filter(|(_, _, data)| data.target_id == context.target_id)
+            .map(|(id, _, _)| Subject::Instance(*id))
+            .collect()
     }
 
-    fn damage_modification(&self) -> Option<Priority> {
-        Some(Priority::Modify)
-    }
-
-    fn modify_damage(&self, context: &mut DamageContext, _world: &GameState, buff_id: BuffId) {
-        if context.target_id != self.target_id {
+    fn modify(
+        &self,
+        context: &mut DamageContext,
+        subject: Subject,
+        query: &duel::core::query::Query<'_>,
+    ) {
+        let Subject::Instance(id) = subject else {
+            return;
+        };
+        let Some(data) = query.data::<AuditShieldData>(id) else {
+            return;
+        };
+        if data.target_id != context.target_id {
             return;
         }
         context.reduce_to(0);
-        context.consume_buff(buff_id);
+        context.consume_buff(id);
     }
 }
 
@@ -397,7 +482,8 @@ fn audit_two_attacks_consume_one_shot_shield_exactly_once() {
     let mut world = World::new();
     let a = world.add_player(Player::new("A".into(), 10, 3));
     let b = world.add_player(Player::new("B".into(), 20, 0));
-    world.add_buff(Box::new(OneShotShield { target_id: b }));
+    register_damage_rule(&mut world, Priority::Modify, AuditShieldRule);
+    let shield = world.add_data(Some(b), AuditShieldData { target_id: b });
 
     world.execute(AttackOperation::new(a)).expect("第一次攻击");
     assert_eq!(
@@ -406,10 +492,7 @@ fn audit_two_attacks_consume_one_shot_shield_exactly_once() {
         "护盾应挡下第一次攻击"
     );
     assert!(
-        world
-            .get_buffs()
-            .values()
-            .all(|buff| buff.damage_modification().is_none()),
+        world.get_data::<AuditShieldData>(shield).is_none(),
         "护盾应在被挡下的这次提交中一并消耗"
     );
 
@@ -421,10 +504,11 @@ fn audit_two_attacks_consume_one_shot_shield_exactly_once() {
 #[test]
 fn audit_second_rescue_reads_updated_state_and_stays_available() {
     let mut world = World::new();
-    world.install_default_rules();
+    install_default_rules(&mut world);
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_buff(Box::new(Revival::new(player)));
-    world.add_buff(Box::new(Revival::new(player)));
+    register_revival_system(&mut world);
+    let first = add_revival(&mut world, player);
+    let second = add_revival(&mut world, player);
 
     world
         .execute(Damage::new(None, player, 10))
@@ -434,10 +518,12 @@ fn audit_second_rescue_reads_updated_state_and_stays_available() {
         Some(5),
         "第一个救回应以半血复活"
     );
-    // Buff：默认死亡/胜负规则 + 尚未消耗的第二个救回。
-    assert_eq!(
-        world.get_buffs().len(),
-        3,
+    assert!(
+        world.get_data::<RevivalData>(first).is_none(),
+        "第一次救回的机会应被消耗"
+    );
+    assert!(
+        world.get_data::<RevivalData>(second).is_some(),
         "已不需要救回时不得重复消耗第二个救回机会"
     );
 }
@@ -447,27 +533,37 @@ struct RemovePeer {
     peer: BuffId,
 }
 
-impl Buff for RemovePeer {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::Checkpoint, Priority::Modify)]
+impl System for RemovePeer {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Modify)]
     }
 
-    fn operations(
-        &mut self,
-        _event: &Event,
-        _world: &GameState,
-        _buff_id: BuffId,
-    ) -> Vec<Box<dyn Operation>> {
-        vec![Box::new(RemoveBuffOperation(self.peer))]
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::Checkpoint { .. }))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+
+    fn respond(
+        &self,
+        _fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        Ok(vec![Box::new(RemoveDataOperation {
+            buff_id: self.peer,
+            reason: DestructionReason::Explicit,
+        })])
     }
 }
 
 #[test]
-fn audit_buff_removed_mid_dispatch_is_skipped_in_current_event() {
+fn audit_instance_removed_mid_dispatch_is_skipped_in_current_event() {
     let mut world = World::new();
     let count = Rc::new(Cell::new(0));
-    let counter = world.add_buff(Box::new(CheckpointCounter(count.clone())));
-    world.add_buff(Box::new(RemovePeer { peer: counter }));
+    let marker = world.add_data(None, MarkerData);
+    world.add_system(MarkerCounter(count.clone()));
+    world.add_system(RemovePeer { peer: marker });
 
     world.execute(EmitEvent(checkpoint())).expect("事件");
     assert_eq!(count.get(), 0, "轮到之前被移除的候选应被跳过");
@@ -479,38 +575,48 @@ struct DeathBlast {
     participants: Vec<PlayerId>,
 }
 
-impl Buff for DeathBlast {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::AfterPlayerDeath, Priority::Default)]
+impl System for DeathBlast {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(
+            NoticeKind::Event(EventType::AfterPlayerDeath),
+            Priority::Default,
+        )]
     }
 
-    fn operations(
-        &mut self,
-        event: &Event,
-        state: &GameState,
-        _buff_id: BuffId,
-    ) -> Vec<Box<dyn Operation>> {
-        let Event::AfterPlayerDeath(dead) = *event else {
-            return vec![];
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::AfterPlayerDeath(_)))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+
+    fn respond(
+        &self,
+        fact: &Fact<'_>,
+        _subject: Subject,
+        query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        let Some(Event::AfterPlayerDeath(dead)) = fact.event() else {
+            return Ok(vec![]);
         };
-        self.participants
+        Ok(self
+            .participants
             .iter()
-            .filter(|&&other| other != dead)
-            .filter(|&&other| state.get_player(other).is_some_and(|p| p.is_alive()))
+            .filter(|&&other| other != *dead)
+            .filter(|&&other| query.player(other).is_some_and(|p| p.is_alive()))
             .map(|&other| Box::new(Damage::new(None, other, 10)) as Box<dyn Operation>)
-            .collect()
+            .collect())
     }
 }
 
 #[test]
 fn audit_death_reaction_kills_further_players_through_the_same_mechanism() {
     let mut world = World::new();
-    world.install_default_rules();
+    install_default_rules(&mut world);
     let a = world.add_player(Player::new("A".into(), 10, 0));
     let b = world.add_player(Player::new("B".into(), 10, 0));
-    world.add_buff(Box::new(DeathBlast {
+    world.add_system(DeathBlast {
         participants: vec![a, b],
-    }));
+    });
 
     world
         .execute(Damage::new(None, a, 10))
@@ -539,28 +645,34 @@ impl Operation for PublishChain {
 #[derive(Debug)]
 struct ChainDriver;
 
-impl Buff for ChainDriver {
-    fn subscriptions(&self) -> Vec<(EventType, Priority)> {
-        vec![(EventType::RoundEnd, Priority::Default)]
+impl System for ChainDriver {
+    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+        vec![(NoticeKind::Event(EventType::RoundEnd), Priority::Default)]
     }
 
-    fn operations(
-        &mut self,
-        event: &Event,
-        _world: &GameState,
-        _buff_id: BuffId,
-    ) -> Vec<Box<dyn Operation>> {
-        match *event {
-            Event::RoundEnd { round } => vec![Box::new(PublishChain(round))],
-            _ => vec![],
-        }
+    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+        matches!(fact.event(), Some(Event::RoundEnd { .. }))
+            .then(|| vec![Subject::Standalone])
+            .unwrap_or_default()
+    }
+
+    fn respond(
+        &self,
+        fact: &Fact<'_>,
+        _subject: Subject,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        let Some(Event::RoundEnd { round }) = fact.event() else {
+            return Ok(vec![]);
+        };
+        Ok(vec![Box::new(PublishChain(*round))])
     }
 }
 
 #[test]
 fn audit_runaway_reaction_chain_is_bounded_instead_of_overflowing() {
     let mut world = World::new();
-    world.add_buff(Box::new(ChainDriver));
+    world.add_system(ChainDriver);
     let result = world.execute(PublishChain(0));
     assert!(result.is_err(), "失控反应链应报错终止，而不是栈溢出");
     assert!(world.is_operation_failed(), "深度上限错误应记录到世界");

@@ -1,10 +1,13 @@
-use super::super::event::Event;
-use super::super::log::LogEntry;
-use super::super::operation::{
-    skipped, Damage, ExecutionContext, Operation, OperationError, OperationResult,
+//! 攻击业务：普攻 Operation。组织前置通知、资格复查与 Damage 子操作。
+
+use super::super::{
+    event::Event,
+    log::LogEntry,
+    operation::{skipped, ExecutionContext, Operation, OperationError, OperationResult},
+    state::GameState,
+    PlayerId,
 };
-use super::super::state::GameState;
-use super::*;
+use super::damage::Damage;
 
 #[derive(Debug)]
 pub struct Attack;
@@ -95,7 +98,7 @@ impl Operation for AttackOperation {
     }
 }
 
-impl Ability for Attack {
+impl super::super::business::skills::Ability for Attack {
     fn operation(&self, source_id: PlayerId, _world: &GameState) -> Option<Box<dyn Operation>> {
         Some(Box::new(AttackOperation::new(source_id)))
     }
