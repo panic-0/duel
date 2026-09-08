@@ -1,6 +1,9 @@
 //! 伤害业务：参数上下文、Damage 操作与修改规则注册表。
 //! 减伤公式、护盾含义都在业务层；基础层只提供中性的关联提交。
 
+use std::any::Any;
+use std::fmt;
+
 use super::super::{
     buff_data::DestructionReason,
     operation::{
@@ -13,14 +16,26 @@ use super::super::{
     BuffId, PlayerId,
 };
 
-/// 一次伤害的参数草稿。修改规则只调整这里的数据并声明消耗；
-/// 提交与消耗由执行器的受控关联提交统一处理。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 一次伤害的参数草稿。修改规则只调整这里的数据、声明消耗与声明关联更新；
+/// 提交由执行器的受控关联提交统一处理。
 pub struct DamageContext {
     pub source_id: Option<PlayerId>,
     pub target_id: PlayerId,
     pub amount: u64,
     consumption: Vec<BuffId>,
+    updates: Vec<(BuffId, Box<dyn Any>)>,
+}
+
+impl fmt::Debug for DamageContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DamageContext")
+            .field("source_id", &self.source_id)
+            .field("target_id", &self.target_id)
+            .field("amount", &self.amount)
+            .field("consumption", &self.consumption)
+            .field("updates", &self.updates.len())
+            .finish()
+    }
 }
 
 impl DamageContext {
@@ -30,6 +45,7 @@ impl DamageContext {
             target_id,
             amount,
             consumption: Vec::new(),
+            updates: Vec::new(),
         }
     }
 
@@ -42,12 +58,22 @@ impl DamageContext {
         self.consumption.push(buff_id);
     }
 
+    /// 声明本次提交成功时就地更新一份数据实例（保留身份，不产生销毁事实）。
+    /// 多次更新同一实例按声明顺序应用，最后一次生效。
+    pub fn update_buff(&mut self, buff_id: BuffId, data: Box<dyn Any>) {
+        self.updates.push((buff_id, data));
+    }
+
     pub(crate) fn take_consumption(&mut self) -> Vec<BuffId> {
         std::mem::take(&mut self.consumption)
     }
+
+    pub(crate) fn take_updates(&mut self) -> Vec<(BuffId, Box<dyn Any>)> {
+        std::mem::take(&mut self.updates)
+    }
 }
 
-/// 伤害修改规则：读取业务数据、修正伤害草稿并声明消耗。
+/// 伤害修改规则：读取业务数据、修正伤害草稿、声明消耗与声明关联更新。
 /// 只调整参数，不执行子 Operation，不直接修改世界或 Buff 数据；
 /// 也不得批量处理所有实例而绕过候选级排序。
 pub trait DamageRule: std::fmt::Debug {
@@ -115,7 +141,7 @@ impl Operation for Damage {
         mut self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        // 写入前验证：目标不存在则伤害不成立，
+        // 写入前验证：初始目标不存在则伤害不成立，
         // 不得进入参数窗口，更不得提交以伤害成功为前提的资源消耗。
         if context.state().get_player(self.context.target_id).is_none() {
             return skipped();
@@ -150,10 +176,19 @@ impl Operation for Damage {
             }
         }
 
+        // 参数修改（含重定向等改写目标的方式）结束后：
+        // 最终目标仍须存在，伤害才成立；不成立时连同声明的消耗与更新一并放弃。
+        if context.state().get_player(self.context.target_id).is_none() {
+            return skipped();
+        }
+
         let amount = self.context.amount;
         let mut changes = ChangeSet::new().damage(self.context.target_id, amount);
         for id in self.context.take_consumption() {
             changes = changes.destroy(id, DestructionReason::Consumed);
+        }
+        for (id, data) in self.context.take_updates() {
+            changes = changes.update_data(id, data);
         }
         let result = context.submit(changes)?;
         let Some(change) = result.hp else {

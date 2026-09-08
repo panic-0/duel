@@ -384,12 +384,33 @@ impl World {
             destroy,
             updates,
             hp_conflict,
+            remove_player_conflict,
         } = changes;
-        // 多次生命声明属于调用方错误：写入前拒绝，不静默丢弃请求。
+        // 重复声明属于调用方错误：写入前拒绝，不静默丢弃请求。
         if hp_conflict {
             return Err(OperationError::Invalid(
                 "ChangeSet 只允许声明一项生命变化".into(),
             ));
+        }
+        if remove_player_conflict {
+            return Err(OperationError::Invalid(
+                "ChangeSet 只允许声明一名角色移除".into(),
+            ));
+        }
+        // 数据更新的契约边界：只接受与现有记录相同的实际类型；
+        // 跨类型转换应表达为显式的移除／新增，而非普通的字段更新。
+        // 不存在的实例在应用阶段跳过。
+        // 注意：必须先解引用 Box 再取 TypeId，否则比较到的是 Box 自身类型。
+        for (id, data) in &updates {
+            if let Some(record) = self.records.get(id) {
+                let existing: &dyn Any = record.data.as_ref();
+                let incoming: &dyn Any = data.as_ref();
+                if existing.type_id() != incoming.type_id() {
+                    return Err(OperationError::Invalid(format!(
+                        "update_data 的替换类型与实例 {id} 的现有类型不一致"
+                    )));
+                }
+            }
         }
         let mut result = SubmissionResult::default();
         let mut staged: Vec<StagedDestruction> = Vec::new();

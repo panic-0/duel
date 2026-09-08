@@ -578,8 +578,18 @@ impl DamageRule for CapacityShieldRule {
         let Some(data) = query.data::<CapacityShield>(id) else {
             return;
         };
+        // 吸收伤害并声明容量扣减：与最终伤害一起进入受控关联提交。
         let absorbed = data.capacity.min(context.amount);
         context.reduce_to(context.amount - absorbed);
+        if absorbed > 0 {
+            context.update_buff(
+                id,
+                Box::new(CapacityShield {
+                    target_id: data.target_id,
+                    capacity: data.capacity - absorbed,
+                }),
+            );
+        }
     }
 }
 

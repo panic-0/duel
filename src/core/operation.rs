@@ -152,12 +152,21 @@ impl<'a> ExecutionContext<'a> {
         Ok(self.world.submit(changes)?.hp)
     }
     /// 注册一份数据实例，返回稳定身份；销毁事实由后续提交产生。
+    /// 运行期校验生命周期依赖：`Some(owner)` 指向的角色必须仍然存在，
+    /// 否则拒绝创建——D4 允许已产生的操作继续执行，但生命周期资格不豁免。
     pub fn add_data(
         &mut self,
         owner: Option<PlayerId>,
         data: impl BuffData + 'static,
     ) -> Result<BuffId, OperationError> {
         self.world.check_operation_failed()?;
+        if let Some(owner_id) = owner {
+            if self.world.get_player(owner_id).is_none() {
+                return Err(OperationError::Invalid(format!(
+                    "生命周期依赖的角色 {owner_id} 已不存在，拒绝创建依赖数据"
+                )));
+            }
+        }
         Ok(self.world.add_data(owner, data))
     }
 
@@ -266,6 +275,8 @@ pub struct ChangeSet {
     /// 是否重复声明了生命变化；提交时明确拒绝，不静默覆盖。
     pub(crate) hp_conflict: bool,
     pub(crate) remove_player: Option<PlayerId>,
+    /// 是否重复声明了角色移除；提交时明确拒绝，不静默覆盖。
+    pub(crate) remove_player_conflict: bool,
     pub(crate) destroy: Vec<(BuffId, DestructionReason)>,
     pub(crate) updates: Vec<(BuffId, Box<dyn Any>)>,
 }
@@ -313,7 +324,11 @@ impl ChangeSet {
     }
 
     /// 移除一名角色；其 owner 依赖的数据实例随同次提交销毁（原因 OwnerDeath）。
+    /// 与生命声明一致，重复移除声明在提交时明确拒绝，不静默覆盖。
     pub fn remove_player(mut self, id: PlayerId) -> Self {
+        if self.remove_player.is_some() {
+            self.remove_player_conflict = true;
+        }
         self.remove_player = Some(id);
         self
     }

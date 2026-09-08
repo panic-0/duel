@@ -49,16 +49,25 @@ impl System for RevivalSystem {
 
     fn respond(
         &self,
-        _fact: &Fact<'_>,
+        fact: &Fact<'_>,
         subject: Subject,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
+        let Some(Event::BeforePlayerDeath(event_player)) = fact.event() else {
+            return Ok(Vec::new());
+        };
         let Subject::Instance(buff_id) = subject else {
             return Ok(Vec::new());
         };
         let Some(data) = query.data::<RevivalData>(buff_id) else {
             return Ok(Vec::new());
         };
+        // C3A：候选身份在收集时固定，但适用条件不冻结——
+        // 同一通知中更早的响应可能已通过受控更新改变本实例的业务对象；
+        // 轮到本候选时重新核对，不再匹配本次事件就跳过。
+        if data.player_id != *event_player {
+            return Ok(Vec::new());
+        }
         Ok(vec![Box::new(RevivalOperation {
             source_id: data.player_id,
             buff_id,
