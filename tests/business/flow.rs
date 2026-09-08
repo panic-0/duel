@@ -316,7 +316,7 @@ fn round_limit_ends_after_round_end_reactions_without_needing_another_round() {
     let mut world = World::new();
     let a = world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
-    world.get_player_mut(a).unwrap().set_hp(5);
+    assert!(world.set_initial_hp(a, 5));
     op_system(&mut world, &[EventType::RoundEnd], move |_, _| {
         vec![Box::new(Heal::new(a, 2)) as Box<dyn Operation>]
     });

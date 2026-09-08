@@ -155,8 +155,14 @@ impl World {
     }
 
     /// 仅限初始化配置；运行期生命变化必须走受控提交。
-    pub fn get_player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
-        self.state.get_player_mut(id)
+    /// 设置初始化阶段的生命值；运行期生命变化必须通过受控提交。
+    pub fn set_initial_hp(&mut self, id: PlayerId, hp: u64) -> bool {
+        self.state
+            .get_player_mut(id)
+            .map(|player| {
+                player.set_hp(hp);
+            })
+            .is_some()
     }
 
     pub(crate) fn state_view(&self) -> &GameState {

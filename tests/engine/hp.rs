@@ -145,7 +145,7 @@ fn c1a_hp_submission_returns_history_after_finishing_reactions() {
 fn maximum_unsigned_damage_must_not_become_healing() {
     let mut world = World::new();
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.get_player_mut(player).expect("初始化玩家").set_hp(5);
+    assert!(world.set_initial_hp(player, 5));
     let (_, value) = world
         .execute(Damage::new(None, player, u64::MAX))
         .expect("伤害");
@@ -160,7 +160,7 @@ fn maximum_unsigned_damage_must_not_become_healing() {
 fn maximum_unsigned_heal_must_not_become_damage() {
     let mut world = World::new();
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.get_player_mut(player).expect("初始化玩家").set_hp(5);
+    assert!(world.set_initial_hp(player, 5));
     let (_, value) = world.execute(Heal::new(player, u64::MAX)).expect("治疗");
     let change = value
         .expect("生命结果")

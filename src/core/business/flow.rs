@@ -52,13 +52,15 @@ impl Operation for RoundOperation {
         if context.is_end() {
             return completed();
         }
-        let mut current = context
+        // 在回合开始时固定座次快照；本回合每个当时存活的玩家最多获得一次行动。
+        let turn_order: Vec<PlayerId> = context
             .state()
             .get_players()
             .iter()
-            .find(|(_, player)| player.is_alive())
-            .map(|(id, _)| *id);
-        while let Some(player_id) = current {
+            .filter(|(_, player)| player.is_alive())
+            .map(|(id, _)| *id)
+            .collect();
+        for player_id in turn_order {
             context.execute(TurnOperation {
                 round: self.round,
                 player_id,
@@ -66,7 +68,6 @@ impl Operation for RoundOperation {
             if context.is_end() {
                 break;
             }
-            current = context.state().get_next_player_not_around(player_id);
         }
         if context.is_end() {
             return completed();

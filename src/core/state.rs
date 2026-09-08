@@ -42,19 +42,11 @@ impl GameState {
         self.players.get(&id)
     }
 
-    pub fn get_player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
+    pub(crate) fn get_player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
         self.players.get_mut(&id)
     }
 
-    /// id 之后第一个存活玩家（不回绕）
-    pub fn get_next_player_not_around(&self, id: PlayerId) -> Option<PlayerId> {
-        self.players
-            .range(id + 1..)
-            .find(|(_, player)| player.is_alive())
-            .map(|(id, _)| *id)
-    }
-
-    /// id 之后第一个存活玩家（回绕到队首）
+    /// id 之后第一个存活玩家；到队尾后回绕到队首。
     pub fn get_next_player_around(&self, id: PlayerId) -> Option<PlayerId> {
         self.players
             .range(id + 1..)

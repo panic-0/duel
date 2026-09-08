@@ -122,7 +122,7 @@ fn system_returned_operation_list_survives_source_destruction() {
     install_default_rules(&mut world);
     let owner = world.add_player(Player::new("Owner".into(), 10, 0));
     let ally = world.add_player(Player::new("Ally".into(), 20, 0));
-    world.get_player_mut(ally).unwrap().set_hp(15);
+    assert!(world.set_initial_hp(ally, 15));
     let mark = world.add_data(Some(owner), CounterMark);
     world.add_system(CounterAndHealSystem { owner, ally });
 
@@ -258,8 +258,8 @@ fn operation_combination_does_not_depend_on_source_survival() {
     let ally1 = world.add_player(Player::new("Ally1".into(), 20, 0));
     let ally2 = world.add_player(Player::new("Ally2".into(), 20, 0));
     // 仅用于初始化：让治疗量可见。
-    world.get_player_mut(ally1).unwrap().set_hp(15);
-    world.get_player_mut(ally2).unwrap().set_hp(15);
+    assert!(world.set_initial_hp(ally1, 15));
+    assert!(world.set_initial_hp(ally2, 15));
     let source_buff = world.add_data(Some(owner), SourceMark);
 
     world

@@ -253,8 +253,8 @@ fn revival_rechecks_event_target_after_same_id_update() {
     let b = world.add_player(Player::new("B".into(), 10, 0));
     let c = world.add_player(Player::new("C".into(), 10, 0));
     // 初始化两名零血角色；不装配默认死亡规则，本例只测试这条通知的匹配。
-    world.get_player_mut(b).unwrap().set_hp(0);
-    world.get_player_mut(c).unwrap().set_hp(0);
+    assert!(world.set_initial_hp(b, 0));
+    assert!(world.set_initial_hp(c, 0));
     let revival = world.add_data(None, RevivalData { player_id: b });
     world.add_system(RetargetBeforeRevival {
         event_player: b,

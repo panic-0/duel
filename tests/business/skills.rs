@@ -153,7 +153,7 @@ fn dead_holder_does_not_get_a_new_normal_action_from_surviving_skill_data() {
     let sponsor = world.add_player(Player::new("Sponsor".into(), 20, 0));
     let actor = world.add_player(Player::new("Actor".into(), 20, 0));
     let ally = world.add_player(Player::new("Ally".into(), 20, 0));
-    world.get_player_mut(ally).unwrap().set_hp(10); // 仅用于测试初始化。
+    assert!(world.set_initial_hp(ally, 10)); // 仅用于测试初始化。
 
     // 生命周期依赖是 Sponsor；技能的使用者是 Actor。
     let skills = world.add_data(
@@ -224,7 +224,7 @@ fn holder_killed_by_turn_notice_does_not_get_a_first_normal_action() {
     let sponsor = world.add_player(Player::new("Sponsor".into(), 20, 0));
     let actor = world.add_player(Player::new("Actor".into(), 20, 0));
     let ally = world.add_player(Player::new("Ally".into(), 20, 0));
-    world.get_player_mut(ally).unwrap().set_hp(10);
+    assert!(world.set_initial_hp(ally, 10));
     world.add_data(
         Some(sponsor),
         Abilities::new(actor, vec![Box::new(HealAlly(ally))]),
@@ -266,7 +266,7 @@ fn normal_action_cursor_does_not_skip_attack_after_conditional_heal_disappears()
     let mut world = World::new();
     let a = world.add_player(Player::new("A".into(), 10, 3));
     let b = world.add_player(Player::new("B".into(), 20, 0));
-    world.get_player_mut(a).unwrap().set_hp(9); // 仅用于测试初始化。
+    assert!(world.set_initial_hp(a, 9)); // 仅用于测试初始化。
     world.add_data(
         Some(a),
         Abilities::new(a, vec![Box::new(HealIfWounded), Box::new(Attack)]),

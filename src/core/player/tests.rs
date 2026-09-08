@@ -48,3 +48,9 @@ fn test_player_hp_percentage() {
     player.modify_hp(-50);
     assert_eq!(player.hp_percentage(), 0.0);
 }
+
+#[test]
+fn zero_max_hp_has_zero_percentage() {
+    let player = Player::new("Empty".to_string(), 0, 15);
+    assert_eq!(player.hp_percentage(), 0.0);
+}

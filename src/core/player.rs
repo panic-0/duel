@@ -38,17 +38,22 @@ impl Player {
     }
 
     pub fn hp_percentage(&self) -> f64 {
-        self.hp as f64 / self.max_hp as f64
+        if self.max_hp == 0 {
+            0.0
+        } else {
+            self.hp as f64 / self.max_hp as f64
+        }
     }
 
     // 带校验的写入
     /// 仅限对局开始前的初始配置；运行期的生命变化必须走受控提交
     /// （ExecutionContext::modify_hp / submit_damage），否则不会产生基础事件。
-    pub fn set_hp(&mut self, hp: u64) {
+    pub(crate) fn set_hp(&mut self, hp: u64) {
         self.hp = hp.min(self.max_hp);
     }
 
-    pub fn modify_hp(&mut self, modifier: i64) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn modify_hp(&mut self, modifier: i64) -> u64 {
         if modifier < 0 {
             self.damage(modifier.unsigned_abs());
         } else {
