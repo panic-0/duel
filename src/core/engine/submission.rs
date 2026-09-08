@@ -1,27 +1,27 @@
 //! 关联变化的校验、写入及提交后通知。
 
-use super::{dispatch::Notice, World};
+use super::{dispatch::DispatchEnvelope, BattleEngine};
 use crate::core::{
-    buff_data::DestructionReason,
+    component::DestructionReason,
     event::Event,
     log::LogEntry,
     operation::{ChangeSet, DestroyedInfo, HpChange, HpRequest, OperationError, SubmissionResult},
-    BuffId, PlayerId,
+    ComponentId, PlayerId,
 };
 use std::any::Any;
 
 struct StagedDestruction {
-    buff_id: BuffId,
+    buff_id: ComponentId,
     owner: Option<PlayerId>,
     reason: DestructionReason,
     data: Box<dyn Any>,
 }
 
-impl World {
+impl BattleEngine {
     // —— 受控提交与通知 ——
 
     /// 中性关联提交：全部关联变化写入完成后，才按
-    /// “基础状态事实（提交声明顺序）→ 销毁事实（BuffId 升序）”开放通知；
+    /// “基础状态事实（提交声明顺序）→ 销毁事实（ComponentId 升序）”开放通知；
     /// 每条事实的嵌套反应完整结束后，再继续本组下一条事实。
     pub(crate) fn submit(
         &mut self,
@@ -57,7 +57,7 @@ impl World {
                 let incoming: &dyn Any = data.as_ref();
                 if existing.type_id() != incoming.type_id() {
                     return Err(OperationError::Invalid(format!(
-                        "update_data 的替换类型与实例 {id} 的现有类型不一致"
+                        "update_component 的替换类型与实例 {id} 的现有类型不一致"
                     )));
                 }
             }
@@ -75,7 +75,7 @@ impl World {
         if let Some(player_id) = remove_player {
             result.player_removed = self.take_player(player_id).is_some();
             if result.player_removed {
-                let owned: Vec<BuffId> = self
+                let owned: Vec<ComponentId> = self
                     .records
                     .iter()
                     .filter(|(_, record)| record.owner == Some(player_id))
@@ -135,7 +135,7 @@ impl World {
             }
         }
         for item in staged {
-            self.dispatch_notice(Notice::Destroyed {
+            self.dispatch_event(DispatchEnvelope::Destroyed {
                 buff_id: item.buff_id,
                 owner: item.owner,
                 reason: item.reason,

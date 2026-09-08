@@ -2,10 +2,10 @@
 //! 每个正常行动及其全部反应完成后发布胜负检查点；终局判断由胜负 System 作出。
 
 use super::super::{
+    engine::{BattleEngine, BattleResult, MAX_ROUNDS},
     event::{Checkpoint, Event},
-    operation::{completed, ExecutionContext, Operation, OperationError, OperationOutcome},
-    world::{GameResult, World, MAX_ROUNDS},
-    BuffId, PlayerId,
+    operation::{completed, ActionContext, Operation, OperationError, OperationOutcome},
+    ComponentId, PlayerId,
 };
 use super::skills::Abilities;
 
@@ -16,7 +16,7 @@ pub trait DuelRunner {
     fn run_with_max_rounds(&mut self, max_rounds: u32) -> Result<(), OperationError>;
 }
 
-impl DuelRunner for World {
+impl DuelRunner for BattleEngine {
     fn run(&mut self) -> Result<(), OperationError> {
         self.execute(DuelOperation::new(MAX_ROUNDS)).map(|_| ())
     }
@@ -28,7 +28,7 @@ impl DuelRunner for World {
 
 /// 发布胜负检查点；终局判断由独立胜负 System 在检查点上作出。
 fn run_checkpoint(
-    context: &mut ExecutionContext<'_>,
+    context: &mut ActionContext<'_>,
     phase: Checkpoint,
     round: Option<u32>,
 ) -> Result<(), OperationError> {
@@ -45,7 +45,7 @@ pub struct RoundOperation {
 impl Operation for RoundOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.try_publish(Event::RoundStart { round: self.round })?;
         run_checkpoint(context, Checkpoint::RoundStart, Some(self.round))?;
@@ -55,7 +55,7 @@ impl Operation for RoundOperation {
         // 在回合开始时固定座次快照；本回合每个当时存活的玩家最多获得一次行动。
         let turn_order: Vec<PlayerId> = context
             .state()
-            .get_players()
+            .players()
             .iter()
             .filter(|(_, player)| player.is_alive())
             .map(|(id, _)| *id)
@@ -92,7 +92,7 @@ pub struct TurnOperation {
 impl Operation for TurnOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.try_publish(Event::BeforeTurn {
             round: self.round,
@@ -104,7 +104,7 @@ impl Operation for TurnOperation {
         }
         if !context
             .state()
-            .get_player(self.player_id)
+            .player(self.player_id)
             .is_some_and(|player| player.is_alive())
         {
             return completed();
@@ -114,14 +114,14 @@ impl Operation for TurnOperation {
             player_id: self.player_id,
         })?;
         // 游标记录“已执行的最远技能槽位”，保证资格变化不错位。
-        let mut executed: Option<(BuffId, usize)> = None;
+        let mut executed: Option<(ComponentId, usize)> = None;
         while !context.is_end() {
             // 行动资格在每次选择前重新判断：Turn 通知的反应或前一个
             // 正常行动都可能使持有者死亡——死者不得再获得新的正常行动，
             // 技能数据仍然存活也不代表持有资格成立。
             if !context
                 .state()
-                .get_player(self.player_id)
+                .player(self.player_id)
                 .is_some_and(|player| player.is_alive())
             {
                 break;
@@ -150,14 +150,14 @@ impl TurnOperation {
     /// 查询该玩家在游标之后的下一个正常行动；每次都按当前状态重新收集。
     fn next_action(
         &self,
-        context: &mut ExecutionContext<'_>,
-        after: Option<(BuffId, usize)>,
-    ) -> Option<((BuffId, usize), Box<dyn Operation>)> {
-        let mut chosen: Option<((BuffId, usize), Box<dyn Operation>)> = None;
+        context: &mut ActionContext<'_>,
+        after: Option<(ComponentId, usize)>,
+    ) -> Option<((ComponentId, usize), Box<dyn Operation>)> {
+        let mut chosen: Option<((ComponentId, usize), Box<dyn Operation>)> = None;
         {
             let query = context.query();
             // 按业务持有者字段匹配技能集合；记录 owner 只决定生命周期。
-            for (id, _, abilities) in query.instances::<Abilities>() {
+            for (id, _, abilities) in query.components::<Abilities>() {
                 if abilities.holder() != self.player_id {
                     continue;
                 }
@@ -190,19 +190,19 @@ impl DuelOperation {
 impl Operation for DuelOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.try_publish(Event::DuelStart)?;
         run_checkpoint(context, Checkpoint::DuelStart, None)?;
         if self.max_rounds == 0 && !context.is_end() {
-            context.end_game(GameResult::Draw)?;
+            context.end_game(BattleResult::Draw)?;
         }
 
         let mut round = 1;
         while !context.is_end() && round <= self.max_rounds {
             context.execute(RoundOperation { round })?;
             if !context.is_end() && round >= self.max_rounds {
-                context.end_game(GameResult::Draw)?;
+                context.end_game(BattleResult::Draw)?;
             }
             round += 1;
         }

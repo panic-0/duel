@@ -1,10 +1,13 @@
+//! 事件响应 System、事件事实包装和反应目标。
+
 use std::any::Any;
 
-use super::buff_data::DestructionReason;
-use super::event::{Event, EventType};
+use super::component::DestructionReason;
+use super::event::Event;
+pub use super::event::EventKind;
 use super::operation::{Operation, OperationError};
 use super::query::Query;
-use super::{BuffId, PlayerId};
+use super::{ComponentId, PlayerId};
 
 /// 通知分发优先级：变体声明顺序即触发顺序（小者先触发）。
 /// 同级内部按统一候选键排序，不按“全局／局部”划分特权阶段。
@@ -22,23 +25,16 @@ pub enum Priority {
 
 /// 响应主体：数据实例候选，或独立 System 的不绑定候选。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Subject {
+pub enum ReactionTarget {
     Standalone,
-    Instance(BuffId),
-}
-
-/// System 订阅的通知种类：普通事件，或数据销毁事实。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NoticeKind {
-    Event(EventType),
-    Destroyed,
+    Instance(ComponentId),
 }
 
 /// 销毁事实的只读视图。被销毁数据由本次提交暂存，分发期间只读借用；
 /// System 应让 Operation 携带独立参数返回，不保留对它的引用。
 #[derive(Debug)]
 pub struct Destruction<'a> {
-    pub buff_id: BuffId,
+    pub buff_id: ComponentId,
     pub owner: Option<PlayerId>,
     pub reason: DestructionReason,
     pub data: &'a (dyn Any + 'static),
@@ -46,17 +42,17 @@ pub struct Destruction<'a> {
 
 /// System 读到的只读事实：普通事件或销毁事实，共用同一分发与排序机制。
 #[derive(Debug)]
-pub enum Fact<'a> {
+pub enum EventEnvelope<'a> {
     Event(&'a Event),
     Destroyed(Destruction<'a>),
 }
 
-impl<'a> Fact<'a> {
+impl<'a> EventEnvelope<'a> {
     /// 普通事件的便捷访问；销毁事实返回 `None`。
     pub fn event(&self) -> Option<&'a Event> {
         match self {
-            Fact::Event(event) => Some(event),
-            Fact::Destroyed(_) => None,
+            EventEnvelope::Event(event) => Some(event),
+            EventEnvelope::Destroyed(_) => None,
         }
     }
 }
@@ -70,13 +66,13 @@ impl<'a> Fact<'a> {
 /// 必须逐候选响应，与其他 System 的候选交错排序，不能批量处理完再轮到别人。
 pub trait System: std::fmt::Debug {
     /// 声明订阅的通知与优先级。
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
         Vec::new()
     }
 
     /// 收集本 System 对该事实的候选主体。
     /// 只确定候选身份与业务范围，不冻结生命、次数等可变条件。
-    fn candidates(&self, _fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, _fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         Vec::new()
     }
 
@@ -84,8 +80,8 @@ pub trait System: std::fmt::Debug {
     /// 返回后即不再借用被销毁数据；Operation 应携带独立参数。
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(Vec::new())

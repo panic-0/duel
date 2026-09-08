@@ -3,8 +3,8 @@
 use super::super::{
     event::Event,
     log::LogEntry,
-    operation::{skipped, ExecutionContext, Operation, OperationError, OperationResult},
-    state::GameState,
+    operation::{skipped, ActionContext, Operation, OperationError, OperationResult},
+    state::BattleState,
     PlayerId,
 };
 use super::damage::Damage;
@@ -25,27 +25,23 @@ impl AttackOperation {
 }
 
 /// 默认普攻规则：来源与目标在伤害提交前都有效，攻击才继续。
-fn combatants_valid(
-    context: &ExecutionContext<'_>,
-    source_id: PlayerId,
-    target_id: PlayerId,
-) -> bool {
+fn combatants_valid(context: &ActionContext<'_>, source_id: PlayerId, target_id: PlayerId) -> bool {
     context
         .state()
-        .get_player(source_id)
+        .player(source_id)
         .is_some_and(|p| p.is_alive())
         && context
             .state()
-            .get_player(target_id)
+            .player(target_id)
             .is_some_and(|p| p.is_alive())
 }
 
 impl Operation for AttackOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<(OperationResult, Option<Box<dyn std::any::Any>>), OperationError> {
-        let Some(source) = context.state().get_player(self.source_id) else {
+        let Some(source) = context.state().player(self.source_id) else {
             return skipped();
         };
         if !source.is_alive() {
@@ -67,7 +63,7 @@ impl Operation for AttackOperation {
         }
         let amount = context
             .state()
-            .get_player(self.source_id)
+            .player(self.source_id)
             .map(|p| p.attack())
             .unwrap_or(0);
         context.log(LogEntry::Attack {
@@ -103,7 +99,7 @@ impl Operation for AttackOperation {
 }
 
 impl super::super::business::skills::Ability for Attack {
-    fn operation(&self, source_id: PlayerId, _world: &GameState) -> Option<Box<dyn Operation>> {
+    fn operation(&self, source_id: PlayerId, _world: &BattleState) -> Option<Box<dyn Operation>> {
         Some(Box::new(AttackOperation::new(source_id)))
     }
 }

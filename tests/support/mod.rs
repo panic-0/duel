@@ -1,13 +1,13 @@
 //! 多个行为测试共用的事件与销毁探针、日志收集工具。
 
 use duel::core::{
-    event::{Checkpoint, Event, EventType},
+    event::{Checkpoint, Event, EventKind},
     log::{LogEntry, Logger},
-    operation::{completed, ExecutionContext, Operation, OperationError, OperationOutcome},
+    operation::{completed, ActionContext, Operation, OperationError, OperationOutcome},
     query::Query,
-    state::GameState,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    PlayerId, World,
+    state::BattleState,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine, PlayerId,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -41,7 +41,7 @@ pub(crate) struct CountOperation(pub(crate) Rc<Cell<usize>>);
 impl Operation for CountOperation {
     fn execute(
         self: Box<Self>,
-        _: &mut ExecutionContext<'_>,
+        _: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         self.0.set(self.0.get() + 1);
         completed()
@@ -52,18 +52,22 @@ impl Operation for CountOperation {
 pub(crate) struct CheckpointCounter(pub(crate) Rc<Cell<usize>>);
 
 impl System for CheckpointCounter {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Checkpoint { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(CountOperation(self.0.clone()))])
@@ -76,7 +80,7 @@ pub(crate) struct Count(pub(crate) Rc<Cell<usize>>);
 impl Operation for Count {
     fn execute(
         self: Box<Self>,
-        _: &mut ExecutionContext<'_>,
+        _: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         self.0.set(self.0.get() + 1);
         completed()
@@ -104,59 +108,56 @@ pub(crate) struct DependencyCounter {
 }
 
 impl System for DependencyCounter {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(
-            NoticeKind::Event(EventType::AfterPlayerDeath),
-            Priority::Default,
-        )]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::AfterPlayerDeath, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::AfterPlayerDeath(_)))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         self.after_death_count.set(self.after_death_count.get() + 1);
         self.observed_instances.set(
-            query.instances::<BelovedMark>().len() as i64
-                + query.instances::<CrossRoleShield>().len() as i64,
+            query.components::<BelovedMark>().len() as i64
+                + query.components::<CrossRoleShield>().len() as i64,
         );
         Ok(vec![])
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct RuntimeFailureOn(pub(crate) EventType);
+pub(crate) struct RuntimeFailureOn(pub(crate) EventKind);
 
 impl System for RuntimeFailureOn {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(self.0), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(self.0, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         fact.event()
-            .map(|_| vec![Subject::Standalone])
+            .map(|_| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Err(OperationError::Failed("终局测试不应触发".into()))
     }
 }
 
-pub(crate) type Handler = dyn Fn(&Fact<'_>, &GameState) -> Vec<Box<dyn Operation>>;
+pub(crate) type Handler = dyn Fn(&EventEnvelope<'_>, &BattleState) -> Vec<Box<dyn Operation>>;
 
 /// 通用响应 System：候选为独立响应，handler 决定提出的操作。
 pub(crate) struct OpSystem {
-    pub(crate) subscriptions: Vec<(NoticeKind, Priority)>,
+    pub(crate) subscriptions: Vec<(EventKind, Priority)>,
     pub(crate) handler: Box<Handler>,
 }
 
@@ -167,18 +168,22 @@ impl fmt::Debug for OpSystem {
 }
 
 impl System for OpSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
         self.subscriptions.clone()
     }
 
-    fn candidates(&self, _fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
-        vec![Subject::Standalone]
+    fn candidates(
+        &self,
+        _fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
+        vec![ReactionTarget::Standalone]
     }
 
     fn respond(
         &self,
-        fact: &Fact<'_>,
-        _subject: Subject,
+        fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok((self.handler)(fact, query.state()))
@@ -186,36 +191,36 @@ impl System for OpSystem {
 }
 
 pub(crate) fn op_system(
-    world: &mut World,
-    events: &[EventType],
-    handler: impl Fn(&Fact<'_>, &GameState) -> Vec<Box<dyn Operation>> + 'static,
+    world: &mut BattleEngine,
+    events: &[EventKind],
+    handler: impl Fn(&EventEnvelope<'_>, &BattleState) -> Vec<Box<dyn Operation>> + 'static,
 ) {
-    world.add_system(OpSystem {
+    world.register_system(OpSystem {
         subscriptions: events
             .iter()
-            .map(|&event| (NoticeKind::Event(event), Priority::Default))
+            .map(|&event| (event, Priority::Default))
             .collect(),
         handler: Box::new(handler),
     });
 }
 
-pub(crate) fn trace_events(world: &mut World) -> Rc<RefCell<Vec<Event>>> {
+pub(crate) fn trace_events(world: &mut BattleEngine) -> Rc<RefCell<Vec<Event>>> {
     let trace = Rc::new(RefCell::new(Vec::new()));
     let sink = trace.clone();
     op_system(
         world,
         &[
-            EventType::DuelStart,
-            EventType::RoundStart,
-            EventType::BeforeTurn,
-            EventType::Turn,
-            EventType::AfterTurn,
-            EventType::RoundEnd,
-            EventType::BeforePlayerAttack,
-            EventType::PlayerAttack,
-            EventType::AfterPlayerAttack,
-            EventType::BeforePlayerDeath,
-            EventType::AfterPlayerDeath,
+            EventKind::DuelStart,
+            EventKind::RoundStart,
+            EventKind::BeforeTurn,
+            EventKind::Turn,
+            EventKind::AfterTurn,
+            EventKind::RoundEnd,
+            EventKind::BeforePlayerAttack,
+            EventKind::PlayerAttack,
+            EventKind::AfterPlayerAttack,
+            EventKind::BeforePlayerDeath,
+            EventKind::AfterPlayerDeath,
         ],
         move |fact, _state| {
             if let Some(event) = fact.event() {

@@ -1,12 +1,13 @@
 //! 事实通知的候选快照、统一排序与同步响应。
 
-use super::World;
+use super::BattleEngine;
 use crate::core::{
-    buff_data::DestructionReason,
+    component::DestructionReason,
     event::Event,
+    event::EventKind,
     operation::OperationError,
-    system::{Fact, NoticeKind, Priority, Subject},
-    BuffId, PlayerId,
+    system::{EventEnvelope, Priority, ReactionTarget},
+    ComponentId, PlayerId,
 };
 use std::any::Any;
 
@@ -16,37 +17,37 @@ struct RankedCandidate {
     subject_order: usize,
     system_order: usize,
     system_id: usize,
-    subject: Subject,
+    subject: ReactionTarget,
 }
 
 /// 一次分发的事实：普通事件或携带暂存数据的销毁事实。
-pub(super) enum Notice {
+pub(super) enum DispatchEnvelope {
     Event(Event),
     Destroyed {
-        buff_id: BuffId,
+        buff_id: ComponentId,
         owner: Option<PlayerId>,
         reason: DestructionReason,
         data: Box<dyn Any>,
     },
 }
 
-impl Notice {
-    fn kind(&self) -> NoticeKind {
+impl DispatchEnvelope {
+    fn kind(&self) -> EventKind {
         match self {
-            Notice::Event(event) => NoticeKind::Event(event.event_type()),
-            Notice::Destroyed { .. } => NoticeKind::Destroyed,
+            DispatchEnvelope::Event(event) => event.kind(),
+            DispatchEnvelope::Destroyed { .. } => EventKind::ComponentDestroyed,
         }
     }
 
-    fn fact(&self) -> Fact<'_> {
+    fn fact(&self) -> EventEnvelope<'_> {
         match self {
-            Notice::Event(event) => Fact::Event(event),
-            Notice::Destroyed {
+            DispatchEnvelope::Event(event) => EventEnvelope::Event(event),
+            DispatchEnvelope::Destroyed {
                 buff_id,
                 owner,
                 reason,
                 data,
-            } => Fact::Destroyed(crate::core::system::Destruction {
+            } => EventEnvelope::Destroyed(crate::core::system::Destruction {
                 buff_id: *buff_id,
                 owner: *owner,
                 reason: *reason,
@@ -56,36 +57,39 @@ impl Notice {
     }
 }
 
-impl World {
+impl BattleEngine {
     pub(crate) fn settle_operation_event(&mut self, event: Event) -> Result<(), OperationError> {
-        // 发布通知是运行期受控入口：世界已记录失败时直接拒绝。
+        // 发布通知是运行期受控入口：引擎已记录失败时直接拒绝。
         self.check_operation_failed()?;
-        self.dispatch_notice(Notice::Event(event))
+        self.dispatch_event(DispatchEnvelope::Event(event))
     }
 
     /// 分发一条事实：开始时统一收集候选并按
     /// `(Priority, 响应主体稳定顺序, System 注册顺序)` 升序固定，
     /// 然后逐候选响应；每个候选返回的 Operation 及其反应完整结束后再继续。
-    pub(super) fn dispatch_notice(&mut self, notice: Notice) -> Result<(), OperationError> {
+    pub(super) fn dispatch_event(
+        &mut self,
+        envelope: DispatchEnvelope,
+    ) -> Result<(), OperationError> {
         if self.end {
             // 正式终局后不再启动后续玩法监听者。
             return Ok(());
         }
         let routes = self
-            .notice_index
-            .get(&notice.kind())
+            .envelope_index
+            .get(&envelope.kind())
             .cloned()
             .unwrap_or_default();
         let mut candidates: Vec<RankedCandidate> = Vec::new();
         {
-            let fact = notice.fact();
+            let fact = envelope.fact();
             let query = self.query();
             for route in &routes {
                 let slot = &self.systems[route.system_id];
                 for subject in slot.system.candidates(&fact, &query) {
                     let subject_order = match subject {
-                        Subject::Instance(id) => query.subject_order(id).unwrap_or(0),
-                        Subject::Standalone => route.system_order,
+                        ReactionTarget::Instance(id) => query.subject_order(id).unwrap_or(0),
+                        ReactionTarget::Standalone => route.system_order,
                     };
                     candidates.push(RankedCandidate {
                         priority: route.priority,
@@ -109,14 +113,14 @@ impl World {
             if self.is_end() {
                 break;
             }
-            // C3A：轮到候选时检查实例仍存在；新增实例不补收当前通知。
-            if let Subject::Instance(id) = candidate.subject {
+            // 候选快照规则：轮到候选时检查实例仍存在；新增实例不补收当前通知。
+            if let ReactionTarget::Instance(id) = candidate.subject {
                 if !self.records.contains_key(&id) {
                     continue;
                 }
             }
             let outcome = {
-                let fact = notice.fact();
+                let fact = envelope.fact();
                 let query = self.query();
                 self.systems[candidate.system_id]
                     .system
@@ -129,7 +133,7 @@ impl World {
                     return Err(error);
                 }
             };
-            // D4：候选返回的 Operation 已产生，即使后续反应销毁了来源数据也继续执行。
+            // 操作生命周期规则：候选返回的 Operation 已产生，即使后续反应销毁了来源数据也继续执行。
             for operation in ops {
                 if self.is_end() {
                     break;
@@ -142,7 +146,7 @@ impl World {
 
     /// 结算事件；错误在记录后原样返回，保证失败状态对后续受控入口可见。
     pub(super) fn settle_and_record(&mut self, event: Event) -> Result<(), OperationError> {
-        let result = self.dispatch_notice(Notice::Event(event));
+        let result = self.dispatch_event(DispatchEnvelope::Event(event));
         if let Err(error) = &result {
             self.record_operation_error(error.clone());
         }

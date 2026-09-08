@@ -1,3 +1,5 @@
+//! 战斗事件与事件种类。Event 是不可变事实，EventKind 用于订阅和路由。
+
 use super::PlayerId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,7 +68,7 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EventType {
+pub enum EventKind {
     // 状态事件
     DuelStart,
     HpChanged,
@@ -83,24 +85,26 @@ pub enum EventType {
     AfterPlayerAttack,
     BeforePlayerDeath,
     AfterPlayerDeath,
+    /// Component 被显式移除或因 owner 生命周期结束而销毁。
+    ComponentDestroyed,
 }
 
 impl Event {
-    pub fn event_type(&self) -> EventType {
+    pub fn kind(&self) -> EventKind {
         match self {
-            Event::DuelStart => EventType::DuelStart,
-            Event::HpChanged { .. } => EventType::HpChanged,
-            Event::Checkpoint { .. } => EventType::Checkpoint,
-            Event::RoundStart { .. } => EventType::RoundStart,
-            Event::BeforeTurn { .. } => EventType::BeforeTurn,
-            Event::Turn { .. } => EventType::Turn,
-            Event::AfterTurn { .. } => EventType::AfterTurn,
-            Event::RoundEnd { .. } => EventType::RoundEnd,
-            Event::BeforePlayerAttack { .. } => EventType::BeforePlayerAttack,
-            Event::PlayerAttack { .. } => EventType::PlayerAttack,
-            Event::AfterPlayerAttack { .. } => EventType::AfterPlayerAttack,
-            Event::BeforePlayerDeath(_) => EventType::BeforePlayerDeath,
-            Event::AfterPlayerDeath(_) => EventType::AfterPlayerDeath,
+            Event::DuelStart => EventKind::DuelStart,
+            Event::HpChanged { .. } => EventKind::HpChanged,
+            Event::Checkpoint { .. } => EventKind::Checkpoint,
+            Event::RoundStart { .. } => EventKind::RoundStart,
+            Event::BeforeTurn { .. } => EventKind::BeforeTurn,
+            Event::Turn { .. } => EventKind::Turn,
+            Event::AfterTurn { .. } => EventKind::AfterTurn,
+            Event::RoundEnd { .. } => EventKind::RoundEnd,
+            Event::BeforePlayerAttack { .. } => EventKind::BeforePlayerAttack,
+            Event::PlayerAttack { .. } => EventKind::PlayerAttack,
+            Event::AfterPlayerAttack { .. } => EventKind::AfterPlayerAttack,
+            Event::BeforePlayerDeath(_) => EventKind::BeforePlayerDeath,
+            Event::AfterPlayerDeath(_) => EventKind::AfterPlayerDeath,
         }
     }
 }

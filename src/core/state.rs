@@ -1,3 +1,5 @@
+//! 玩家与结构化日志组成的战斗状态。运行期修改由 BattleEngine 统一提交。
+
 use super::{
     log::{LogEntry, Logger},
     player::Player,
@@ -8,15 +10,15 @@ use std::collections::BTreeMap;
 /// 游戏状态：玩家数据与日志。不含 buff、事件队列等引擎机制，
 /// 监听者（buff/ability/流程驱动/结束条件）只拿到本结构的只读引用。
 #[derive(Debug)]
-pub struct GameState {
+pub struct BattleState {
     players: BTreeMap<PlayerId, Player>,
     player_id_counter: PlayerId,
     logger: Logger,
 }
 
-impl GameState {
+impl BattleState {
     pub fn new() -> Self {
-        GameState {
+        BattleState {
             players: BTreeMap::new(),
             player_id_counter: 0,
             logger: Logger::default(),
@@ -34,11 +36,11 @@ impl GameState {
         self.players.remove(&id)
     }
 
-    pub fn get_players(&self) -> &BTreeMap<PlayerId, Player> {
+    pub fn players(&self) -> &BTreeMap<PlayerId, Player> {
         &self.players
     }
 
-    pub fn get_player(&self, id: PlayerId) -> Option<&Player> {
+    pub fn player(&self, id: PlayerId) -> Option<&Player> {
         self.players.get(&id)
     }
 
@@ -68,8 +70,8 @@ impl GameState {
     }
 }
 
-impl Default for GameState {
+impl Default for BattleState {
     fn default() -> Self {
-        GameState::new()
+        BattleState::new()
     }
 }

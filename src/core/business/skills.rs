@@ -3,14 +3,14 @@
 
 use super::super::{
     operation::{Operation, OperationResult},
-    state::GameState,
+    state::BattleState,
     PlayerId,
 };
 use super::attack::AttackOperation;
 
 /// 技能定义：按当前状态产生对应的 Operation，不另建执行器。
 pub trait Ability: std::fmt::Debug {
-    fn operation(&self, source_id: PlayerId, world: &GameState) -> Option<Box<dyn Operation>>;
+    fn operation(&self, source_id: PlayerId, world: &BattleState) -> Option<Box<dyn Operation>>;
 }
 
 /// 连击技能：一次正常行动中连续发动指定次数的普攻。
@@ -26,7 +26,7 @@ impl Combo {
 }
 
 impl Ability for Combo {
-    fn operation(&self, source_id: PlayerId, _world: &GameState) -> Option<Box<dyn Operation>> {
+    fn operation(&self, source_id: PlayerId, _world: &BattleState) -> Option<Box<dyn Operation>> {
         (self.hits > 0).then(|| {
             Box::new(ComboOperation {
                 source_id,
@@ -45,7 +45,7 @@ pub struct ComboOperation {
 impl Operation for ComboOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut super::super::operation::ExecutionContext<'_>,
+        context: &mut super::super::operation::ActionContext<'_>,
     ) -> Result<super::super::operation::OperationOutcome, super::super::operation::OperationError>
     {
         let mut completed_hits = 0u8;
@@ -83,7 +83,7 @@ impl Abilities {
     pub fn normal_actions(
         &self,
         source_id: PlayerId,
-        world: &GameState,
+        world: &BattleState,
     ) -> Vec<(usize, Box<dyn Operation>)> {
         self.abilities
             .iter()

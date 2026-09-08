@@ -2,17 +2,16 @@
 //! 救回机会作为数据实例存在；成功消费与回血在同一次操作中显式关联。
 
 use super::super::{
-    buff_data::DestructionReason,
-    event::{Event, EventType},
+    component::DestructionReason,
+    engine::BattleEngine,
+    event::{Event, EventKind},
     log::LogEntry,
     operation::{
-        completed, skipped, ChangeSet, ExecutionContext, Operation, OperationError,
-        OperationOutcome,
+        completed, skipped, ActionContext, ChangeSet, Operation, OperationError, OperationOutcome,
     },
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    world::World,
-    BuffId, PlayerId,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    ComponentId, PlayerId,
 };
 
 /// 救回数据实例：`player_id` 是业务上的服务对象（被救回的角色）；
@@ -28,41 +27,38 @@ pub struct RevivalData {
 pub struct RevivalSystem;
 
 impl System for RevivalSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(
-            NoticeKind::Event(EventType::BeforePlayerDeath),
-            Priority::Default,
-        )]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::BeforePlayerDeath, Priority::Default)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, query: &Query<'_>) -> Vec<ReactionTarget> {
         let Some(Event::BeforePlayerDeath(player_id)) = fact.event() else {
             return Vec::new();
         };
         query
-            .instances::<RevivalData>()
+            .components::<RevivalData>()
             .iter()
             .filter(|(_, _, data)| data.player_id == *player_id)
-            .map(|(id, _, _)| Subject::Instance(*id))
+            .map(|(id, _, _)| ReactionTarget::Instance(*id))
             .collect()
     }
 
     fn respond(
         &self,
-        fact: &Fact<'_>,
-        subject: Subject,
+        fact: &EventEnvelope<'_>,
+        subject: ReactionTarget,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         let Some(Event::BeforePlayerDeath(event_player)) = fact.event() else {
             return Ok(Vec::new());
         };
-        let Subject::Instance(buff_id) = subject else {
+        let ReactionTarget::Instance(buff_id) = subject else {
             return Ok(Vec::new());
         };
-        let Some(data) = query.data::<RevivalData>(buff_id) else {
+        let Some(data) = query.component::<RevivalData>(buff_id) else {
             return Ok(Vec::new());
         };
-        // C3A：候选身份在收集时固定，但适用条件不冻结——
+        // 候选快照规则：候选身份在收集时固定，但适用条件不冻结——
         // 同一通知中更早的响应可能已通过受控更新改变本实例的业务对象；
         // 轮到本候选时重新核对，不再匹配本次事件就跳过。
         if data.player_id != *event_player {
@@ -80,16 +76,16 @@ impl System for RevivalSystem {
 #[derive(Debug)]
 pub struct RevivalOperation {
     source_id: PlayerId,
-    buff_id: BuffId,
+    buff_id: ComponentId,
 }
 
 impl Operation for RevivalOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let player_id = self.source_id;
-        let Some(player) = context.state().get_player(player_id) else {
+        let Some(player) = context.state().player(player_id) else {
             return skipped();
         };
         if player.hp() != 0 {
@@ -100,7 +96,7 @@ impl Operation for RevivalOperation {
             return skipped();
         }
         // 写入前验证：救回机会必须仍然存在，否则不免费治疗。
-        if context.data::<RevivalData>(self.buff_id).is_none() {
+        if context.component::<RevivalData>(self.buff_id).is_none() {
             return skipped();
         }
         // 联合提交：消费机会（Consumed）与恢复生命一起写入，之后才开放通知。
@@ -119,11 +115,11 @@ impl Operation for RevivalOperation {
 }
 
 /// 注册救回 System（一次即可）；System 的注册与实例生命周期独立。
-pub fn register_revival_system(world: &mut World) {
-    world.add_system(RevivalSystem);
+pub fn register_revival_system(world: &mut BattleEngine) {
+    world.register_system(RevivalSystem);
 }
 
 /// 为一名玩家添加一次救回机会，返回实例身份。
-pub fn add_revival(world: &mut World, player_id: PlayerId) -> BuffId {
-    world.add_data(Some(player_id), RevivalData { player_id })
+pub fn attach_revival(world: &mut BattleEngine, player_id: PlayerId) -> ComponentId {
+    world.attach_component(Some(player_id), RevivalData { player_id })
 }

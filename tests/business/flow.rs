@@ -3,12 +3,12 @@
 use crate::support::{op_system, trace_events, Count};
 use duel::core::{
     business::skills::Abilities,
-    event::{Checkpoint, Event, EventType},
+    event::{Checkpoint, Event, EventKind},
     install_default_rules,
     operation::{AddPlayerOperation, EmitEvent, Operation, OperationError},
     player::Player,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    Attack, Damage, DuelRunner, Heal, PlayerId, RoundOperation, World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    Attack, BattleEngine, Damage, DuelRunner, Heal, PlayerId, RoundOperation,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -22,20 +22,24 @@ struct TurnSpy {
 }
 
 impl System for TurnSpy {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Turn), Priority::Final)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Turn, Priority::Final)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Turn { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
 
     fn respond(
         &self,
-        fact: &Fact<'_>,
-        _subject: Subject,
+        fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         if let Some(Event::Turn { player_id, .. }) = fact.event() {
@@ -48,15 +52,15 @@ impl System for TurnSpy {
 #[test]
 fn dead_player_never_gets_another_turn() {
     let turns = Rc::new(RefCell::new(Vec::new()));
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let a = world.add_player(Player::new("A".to_string(), 50, 5));
     let b = world.add_player(Player::new("B".to_string(), 5, 1));
     let c = world.add_player(Player::new("C".to_string(), 50, 5));
-    world.add_system(TurnSpy {
+    world.register_system(TurnSpy {
         turns: turns.clone(),
     });
     for id in [a, b, c] {
-        world.add_data(Some(id), Abilities::new(id, vec![Box::new(Attack)]));
+        world.attach_component(Some(id), Abilities::new(id, vec![Box::new(Attack)]));
     }
     install_default_rules(&mut world);
 
@@ -78,20 +82,24 @@ fn dead_player_never_gets_another_turn() {
 struct CheckpointRecorder(Rc<RefCell<Vec<Checkpoint>>>);
 
 impl System for CheckpointRecorder {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Default)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Checkpoint { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
 
     fn respond(
         &self,
-        fact: &Fact<'_>,
-        _subject: Subject,
+        fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         if let Some(Event::Checkpoint { phase, .. }) = fact.event() {
@@ -103,11 +111,11 @@ impl System for CheckpointRecorder {
 
 #[test]
 fn duel_operation_owns_round_turn_and_checkpoint_progression() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     world.add_player(Player::new("A".into(), 10, 0));
     world.add_player(Player::new("B".into(), 10, 0));
     let phases = Rc::new(RefCell::new(Vec::new()));
-    world.add_system(CheckpointRecorder(phases.clone()));
+    world.register_system(CheckpointRecorder(phases.clone()));
     world.run_with_max_rounds(1).expect("对局应正常结束");
     assert!(world.is_end());
     // 两个玩家都没有行动：依次经过 DuelStart、RoundStart、
@@ -124,44 +132,48 @@ fn duel_operation_owns_round_turn_and_checkpoint_progression() {
             Checkpoint::RoundEnd,
         ]
     );
-    assert!(world.get_player(0).is_some());
-    assert!(world.get_player(1).is_some());
+    assert!(world.player(0).is_some());
+    assert!(world.player(1).is_some());
 }
 
 #[test]
 fn duel_operation_stops_at_its_own_round_limit() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     world.add_player(Player::new("A".into(), 10, 0));
     world.add_player(Player::new("B".into(), 10, 0));
     world.run_with_max_rounds(1).expect("对局应正常结束");
     assert!(world.is_end());
-    assert!(world.get_player(0).is_some());
-    assert!(world.get_player(1).is_some());
+    assert!(world.player(0).is_some());
+    assert!(world.player(1).is_some());
 }
 
 #[derive(Debug)]
 struct RoundEndCounter(Rc<Cell<usize>>);
 
 impl System for RoundEndCounter {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
         vec![
-            (NoticeKind::Event(EventType::RoundEnd), Priority::Default),
-            (NoticeKind::Event(EventType::Checkpoint), Priority::Default),
+            (EventKind::RoundEnd, Priority::Default),
+            (EventKind::Checkpoint, Priority::Default),
         ]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         match fact.event() {
-            Some(Event::RoundEnd { .. }) => vec![Subject::Standalone],
+            Some(Event::RoundEnd { .. }) => vec![ReactionTarget::Standalone],
             Some(Event::Checkpoint { phase, .. }) if *phase == Checkpoint::RoundEnd => {
-                vec![Subject::Standalone]
+                vec![ReactionTarget::Standalone]
             }
             _ => vec![],
         }
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(Count(self.0.clone()))])
@@ -170,11 +182,11 @@ impl System for RoundEndCounter {
 
 #[test]
 fn a_standalone_round_finishes_its_own_end_event_and_checkpoint() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     world.add_player(Player::new("A".into(), 10, 0));
     world.add_player(Player::new("B".into(), 10, 0));
     let count = Rc::new(Cell::new(0));
-    world.add_system(RoundEndCounter(count.clone()));
+    world.register_system(RoundEndCounter(count.clone()));
 
     world
         .execute(RoundOperation { round: 1 })
@@ -189,13 +201,13 @@ fn a_standalone_round_finishes_its_own_end_event_and_checkpoint() {
 
 #[test]
 fn before_turn_death_skips_action_but_continues_round() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     install_default_rules(&mut world);
     let a = world.add_player(Player::new("A".into(), 10, 1));
     let b = world.add_player(Player::new("B".into(), 10, 1));
     let c = world.add_player(Player::new("C".into(), 10, 1));
     let trace = trace_events(&mut world);
-    op_system(&mut world, &[EventType::BeforeTurn], move |fact, _| {
+    op_system(&mut world, &[EventKind::BeforeTurn], move |fact, _| {
         match *fact.event().expect("事件事实") {
             Event::BeforeTurn { player_id, .. } if player_id == b => {
                 // E 属于 BeforeTurn(B) 的结算批次，其死亡反应必须先完成。
@@ -210,7 +222,7 @@ fn before_turn_death_skips_action_but_continues_round() {
     });
     op_system(
         &mut world,
-        &[EventType::PlayerAttack],
+        &[EventKind::PlayerAttack],
         |fact, _| match *fact.event().expect("事件事实") {
             Event::PlayerAttack {
                 target_id, damage, ..
@@ -228,7 +240,7 @@ fn before_turn_death_skips_action_but_continues_round() {
         })
         .collect();
     assert_eq!(actors, vec![a, c]);
-    assert!(world.get_player(b).is_none());
+    assert!(world.player(b).is_none());
     let trace = trace.borrow();
     let before_b = trace
         .iter()
@@ -268,14 +280,14 @@ fn before_turn_death_skips_action_but_continues_round() {
 
 #[test]
 fn actor_dying_during_its_turn_still_gets_after_turn_when_game_continues() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     install_default_rules(&mut world);
     let a = world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
     world.add_player(Player::new("C".into(), 10, 1));
     let after_turns = Rc::new(RefCell::new(Vec::new()));
     let sink = after_turns.clone();
-    op_system(&mut world, &[EventType::Turn], move |fact, _| {
+    op_system(&mut world, &[EventKind::Turn], move |fact, _| {
         match *fact.event().expect("事件事实") {
             Event::Turn { player_id, .. } if player_id == a => {
                 vec![Box::new(Damage::new(None, a, 10)) as Box<dyn Operation>]
@@ -283,7 +295,7 @@ fn actor_dying_during_its_turn_still_gets_after_turn_when_game_continues() {
             _ => vec![],
         }
     });
-    op_system(&mut world, &[EventType::AfterTurn], move |fact, _| {
+    op_system(&mut world, &[EventKind::AfterTurn], move |fact, _| {
         if let Some(Event::AfterTurn { player_id, .. }) = fact.event() {
             sink.borrow_mut().push(*player_id);
         }
@@ -295,11 +307,11 @@ fn actor_dying_during_its_turn_still_gets_after_turn_when_game_continues() {
 
 #[test]
 fn zero_round_limit_finishes_start_effects_without_starting_a_round() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
     let trace = trace_events(&mut world);
-    op_system(&mut world, &[EventType::DuelStart], |_, _| {
+    op_system(&mut world, &[EventKind::DuelStart], |_, _| {
         vec![
             Box::new(AddPlayerOperation(Player::new("开局召唤物".into(), 10, 1)))
                 as Box<dyn Operation>,
@@ -307,24 +319,20 @@ fn zero_round_limit_finishes_start_effects_without_starting_a_round() {
     });
     world.run_with_max_rounds(0).expect("对局应正常结束");
     assert!(world.is_end());
-    assert_eq!(world.get_players().len(), 3);
+    assert_eq!(world.players().len(), 3);
     assert_eq!(*trace.borrow(), vec![Event::DuelStart]);
 }
 
 #[test]
 fn round_limit_ends_after_round_end_reactions_without_needing_another_round() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let a = world.add_player(Player::new("A".into(), 10, 1));
     world.add_player(Player::new("B".into(), 10, 1));
     assert!(world.set_initial_hp(a, 5));
-    op_system(&mut world, &[EventType::RoundEnd], move |_, _| {
+    op_system(&mut world, &[EventKind::RoundEnd], move |_, _| {
         vec![Box::new(Heal::new(a, 2)) as Box<dyn Operation>]
     });
     world.run_with_max_rounds(1).expect("对局应正常结束");
-    assert_eq!(
-        world.get_player(a).unwrap().hp(),
-        7,
-        "回合结束的反应应先完成"
-    );
+    assert_eq!(world.player(a).unwrap().hp(), 7, "回合结束的反应应先完成");
     assert!(world.is_end(), "无需等待下一回合事件就应结束");
 }

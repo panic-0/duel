@@ -2,10 +2,10 @@
 
 use crate::support::RuntimeFailureOn;
 use duel::core::{
-    event::EventType,
-    operation::{completed, ExecutionContext, Operation, OperationError, OperationOutcome},
+    event::EventKind,
+    operation::{completed, ActionContext, Operation, OperationError, OperationOutcome},
     player::Player,
-    Damage, DuelRunner, World,
+    BattleEngine, Damage, DuelRunner,
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -15,9 +15,9 @@ struct EndGameOp;
 impl Operation for EndGameOp {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        context.end_game(duel::core::GameResult::Draw)?;
+        context.end_game(duel::core::BattleResult::Draw)?;
         completed()
     }
 }
@@ -31,7 +31,7 @@ struct SummonOp {
 impl Operation for SummonOp {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         self.summoned.set(true);
         self.after.set(self.after.get() + 1);
@@ -49,7 +49,7 @@ struct SpawningParent {
 impl Operation for SpawningParent {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.spawn(EndGameOp);
         context.spawn(SummonOp {
@@ -62,7 +62,7 @@ impl Operation for SpawningParent {
 
 #[test]
 fn spawned_operations_are_not_started_after_terminal() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     world.add_player(Player::new("A".into(), 10, 0));
     let summoned = Rc::new(Cell::new(false));
     let after = Rc::new(Cell::new(0));
@@ -76,7 +76,7 @@ fn spawned_operations_are_not_started_after_terminal() {
 
     assert!(world.is_end());
     assert_eq!(
-        world.get_players().len(),
+        world.players().len(),
         1,
         "正式终局后，已排队但未开始的子操作不得启动"
     );
@@ -85,10 +85,10 @@ fn spawned_operations_are_not_started_after_terminal() {
 }
 
 #[test]
-fn terminal_world_rejects_new_root_request_without_side_effects() {
-    let mut world = World::new();
+fn terminal_engine_rejects_new_root_request_without_side_effects() {
+    let mut world = BattleEngine::new();
     let a = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_system(RuntimeFailureOn(EventType::HpChanged));
+    world.register_system(RuntimeFailureOn(EventKind::HpChanged));
     world.run_with_max_rounds(0).expect("对局应正常结束");
     assert!(world.is_end());
 
@@ -97,6 +97,6 @@ fn terminal_world_rejects_new_root_request_without_side_effects() {
         matches!(result, Err(OperationError::Invalid(_))),
         "终局后的新根请求应返回 Invalid 而不是执行或静默跳过"
     );
-    assert_eq!(world.get_player(a).unwrap().hp(), 10, "不得产生状态变化");
+    assert_eq!(world.player(a).unwrap().hp(), 10, "不得产生状态变化");
     assert!(!world.is_operation_failed(), "正常终局不得被记为执行失败");
 }

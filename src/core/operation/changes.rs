@@ -1,6 +1,6 @@
 //! 关联提交的声明与结果数据。
 
-use crate::core::{buff_data::DestructionReason, BuffId, PlayerId};
+use crate::core::{component::DestructionReason, ComponentId, PlayerId};
 use std::any::Any;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +24,8 @@ pub struct ChangeSet {
     pub(crate) remove_player: Option<PlayerId>,
     /// 是否重复声明了角色移除；提交时明确拒绝，不静默覆盖。
     pub(crate) remove_player_conflict: bool,
-    pub(crate) destroy: Vec<(BuffId, DestructionReason)>,
-    pub(crate) updates: Vec<(BuffId, Box<dyn Any>)>,
+    pub(crate) destroy: Vec<(ComponentId, DestructionReason)>,
+    pub(crate) updates: Vec<(ComponentId, Box<dyn Any>)>,
 }
 
 /// 无符号的生命变化请求；伤害与治疗分别走有界无符号计算。
@@ -81,14 +81,14 @@ impl ChangeSet {
     }
 
     /// 销毁一份数据实例并产生销毁事实。
-    pub fn destroy(mut self, id: BuffId, reason: DestructionReason) -> Self {
+    pub fn destroy(mut self, id: ComponentId, reason: DestructionReason) -> Self {
         self.destroy.push((id, reason));
         self
     }
 
     /// 就地更新一份数据实例：保留原身份与候选顺序，不产生销毁事实。
     /// 多次更新同一实例时按声明顺序应用（最后一次生效）。
-    pub fn update_data(mut self, id: BuffId, data: Box<dyn Any>) -> Self {
+    pub fn update_component(mut self, id: ComponentId, data: Box<dyn Any>) -> Self {
         self.updates.push((id, data));
         self
     }
@@ -97,7 +97,7 @@ impl ChangeSet {
 /// 一份被销毁实例的元信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DestroyedInfo {
-    pub buff_id: BuffId,
+    pub buff_id: ComponentId,
     pub owner: Option<PlayerId>,
     pub reason: DestructionReason,
 }
@@ -108,8 +108,8 @@ pub struct SubmissionResult {
     pub hp: Option<HpChange>,
     /// 声明的角色移除是否实际发生。
     pub player_removed: bool,
-    /// 本组提交销毁的全部实例，按 BuffId 升序。
+    /// 本组提交销毁的全部实例，按 ComponentId 升序。
     pub destroyed: Vec<DestroyedInfo>,
     /// 本组提交就地更新的实例身份，按声明顺序。
-    pub updated: Vec<BuffId>,
+    pub updated: Vec<ComponentId>,
 }

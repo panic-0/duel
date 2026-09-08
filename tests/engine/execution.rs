@@ -2,16 +2,16 @@
 
 use crate::support::op_system;
 use duel::core::{
-    event::{Event, EventType},
+    event::{Event, EventKind},
     install_default_rules,
     operation::{
-        completed, EmitEvent, ExecutionContext, Operation, OperationError, OperationOutcome,
+        completed, ActionContext, EmitEvent, Operation, OperationError, OperationOutcome,
         OperationResult,
     },
     player::Player,
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    BuffId, Damage, DuelRunner, Heal, PlayerId, World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine, ComponentId, Damage, DuelRunner, Heal, PlayerId,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -22,20 +22,24 @@ struct CheckpointHeal {
 }
 
 impl System for CheckpointHeal {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Default)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Checkpoint { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
 
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(duel::core::Heal::new(self.player_id, 1))])
@@ -44,9 +48,9 @@ impl System for CheckpointHeal {
 
 #[test]
 fn system_can_be_implemented_with_operations_only() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let player = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_system(CheckpointHeal { player_id: player });
+    world.register_system(CheckpointHeal { player_id: player });
     world.run_with_max_rounds(0).expect("对局应正常结束");
     assert!(world.is_end());
 }
@@ -60,7 +64,7 @@ struct Chain {
 impl Operation for Chain {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<(OperationResult, Option<Box<dyn std::any::Any>>), OperationError> {
         self.count.set(self.count.get() + 1);
         if self.remaining > 0 {
@@ -75,7 +79,7 @@ impl Operation for Chain {
 
 #[test]
 fn operation_stack_handles_deep_child_chains() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let count = Rc::new(std::cell::Cell::new(0));
     let result = world.execute(Chain {
         remaining: 20_000,
@@ -95,18 +99,18 @@ struct CounterAndHealSystem {
 }
 
 impl System for CounterAndHealSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::RoundStart), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::RoundStart, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::RoundStart { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![
@@ -118,26 +122,26 @@ impl System for CounterAndHealSystem {
 
 #[test]
 fn system_returned_operation_list_survives_source_destruction() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     install_default_rules(&mut world);
     let owner = world.add_player(Player::new("Owner".into(), 10, 0));
     let ally = world.add_player(Player::new("Ally".into(), 20, 0));
     assert!(world.set_initial_hp(ally, 15));
-    let mark = world.add_data(Some(owner), CounterMark);
-    world.add_system(CounterAndHealSystem { owner, ally });
+    let mark = world.attach_component(Some(owner), CounterMark);
+    world.register_system(CounterAndHealSystem { owner, ally });
 
     world
         .execute(EmitEvent(Event::RoundStart { round: 1 }))
         .expect("事件应正常分发");
 
     // 反击先使 owner 死亡并销毁其数据；同一响应已返回的治疗仍按序执行。
-    assert!(world.get_player(owner).is_none(), "反击应使 owner 死亡");
+    assert!(world.player(owner).is_none(), "反击应使 owner 死亡");
     assert!(
-        world.get_data::<CounterMark>(mark).is_none(),
+        world.component::<CounterMark>(mark).is_none(),
         "owner 数据应随死亡销毁"
     );
     assert_eq!(
-        world.get_player(ally).map(|p| p.hp()),
+        world.player(ally).map(|p| p.hp()),
         Some(18),
         "同一响应已返回的操作列表不得因来源销毁被丢弃"
     );
@@ -150,7 +154,7 @@ struct PublishChain(u32);
 impl Operation for PublishChain {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.try_publish(Event::RoundEnd { round: self.0 + 1 })?;
         completed()
@@ -161,20 +165,24 @@ impl Operation for PublishChain {
 struct ChainDriver;
 
 impl System for ChainDriver {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::RoundEnd), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::RoundEnd, Priority::Default)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::RoundEnd { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
 
     fn respond(
         &self,
-        fact: &Fact<'_>,
-        _subject: Subject,
+        fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         let Some(Event::RoundEnd { round }) = fact.event() else {
@@ -185,9 +193,9 @@ impl System for ChainDriver {
 }
 
 #[test]
-fn audit_runaway_reaction_chain_is_bounded_instead_of_overflowing() {
-    let mut world = World::new();
-    world.add_system(ChainDriver);
+fn runaway_reaction_chain_is_bounded_instead_of_overflowing() {
+    let mut world = BattleEngine::new();
+    world.register_system(ChainDriver);
     let result = world.execute(PublishChain(0));
     assert!(result.is_err(), "失控反应链应报错终止，而不是栈溢出");
     assert!(world.is_operation_failed(), "深度上限错误应记录到世界");
@@ -203,7 +211,7 @@ struct CounterThenHeal {
     owner: PlayerId,
     ally_unconditional: PlayerId,
     ally_conditional: PlayerId,
-    source_buff: BuffId,
+    source_buff: ComponentId,
 }
 
 #[derive(Debug)]
@@ -212,7 +220,7 @@ struct UnconditionalHeal(PlayerId);
 impl Operation for UnconditionalHeal {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.submit(duel::core::ChangeSet::new().heal(self.0, 3))?;
         completed()
@@ -220,14 +228,14 @@ impl Operation for UnconditionalHeal {
 }
 
 #[derive(Debug)]
-struct HealOnlyIfSourceExists(PlayerId, BuffId);
+struct HealOnlyIfSourceExists(PlayerId, ComponentId);
 
 impl Operation for HealOnlyIfSourceExists {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        if context.data::<SourceMark>(self.1).is_none() {
+        if context.component::<SourceMark>(self.1).is_none() {
             return Ok((duel::core::OperationResult::Skipped, None));
         }
         context.submit(duel::core::ChangeSet::new().heal(self.0, 3))?;
@@ -238,7 +246,7 @@ impl Operation for HealOnlyIfSourceExists {
 impl Operation for CounterThenHeal {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         context.execute(Damage::new(None, self.owner, 10))?;
         context.execute(UnconditionalHeal(self.ally_unconditional))?;
@@ -252,7 +260,7 @@ impl Operation for CounterThenHeal {
 
 #[test]
 fn operation_combination_does_not_depend_on_source_survival() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     install_default_rules(&mut world);
     let owner = world.add_player(Player::new("Owner".into(), 10, 0));
     let ally1 = world.add_player(Player::new("Ally1".into(), 20, 0));
@@ -260,7 +268,7 @@ fn operation_combination_does_not_depend_on_source_survival() {
     // 仅用于初始化：让治疗量可见。
     assert!(world.set_initial_hp(ally1, 15));
     assert!(world.set_initial_hp(ally2, 15));
-    let source_buff = world.add_data(Some(owner), SourceMark);
+    let source_buff = world.attach_component(Some(owner), SourceMark);
 
     world
         .execute(CounterThenHeal {
@@ -271,18 +279,18 @@ fn operation_combination_does_not_depend_on_source_survival() {
         })
         .expect("组合操作应正常结算");
 
-    assert!(world.get_player(owner).is_none(), "反噬应使来源 owner 死亡");
+    assert!(world.player(owner).is_none(), "反噬应使来源 owner 死亡");
     assert!(
-        world.get_data::<SourceMark>(source_buff).is_none(),
+        world.component::<SourceMark>(source_buff).is_none(),
         "来源数据应随 owner 死亡销毁"
     );
     assert_eq!(
-        world.get_player(ally1).map(|p| p.hp()),
+        world.player(ally1).map(|p| p.hp()),
         Some(18),
         "已产生的无条件治疗不得因来源销毁被自动取消"
     );
     assert_eq!(
-        world.get_player(ally2).map(|p| p.hp()),
+        world.player(ally2).map(|p| p.hp()),
         Some(15),
         "显式要求来源存在的治疗版本应自行跳过"
     );
@@ -290,10 +298,10 @@ fn operation_combination_does_not_depend_on_source_survival() {
 
 #[test]
 fn long_event_reaction_chain_settles_within_depth_budget() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let count = Rc::new(RefCell::new(0));
     let sink = count.clone();
-    op_system(&mut world, &[EventType::RoundEnd], move |fact, _| {
+    op_system(&mut world, &[EventKind::RoundEnd], move |fact, _| {
         if let Some(Event::RoundEnd { round }) = fact.event() {
             *sink.borrow_mut() += 1;
             if *round < 150 {

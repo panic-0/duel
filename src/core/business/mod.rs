@@ -12,11 +12,11 @@ pub mod skills;
 pub mod taunt;
 pub mod victory;
 
-use super::world::World;
+use super::engine::BattleEngine;
 
 /// 显式装配默认玩法规则：零血死亡判断与最后一人生还的胜负检查。
 /// 自定义装配可以只注册其中一部分；装配本身不改变执行协议。
-pub fn install_default_rules(world: &mut World) {
-    world.add_system(death::DeathSystem);
-    world.add_system(victory::VictorySystem);
+pub fn install_default_rules(world: &mut BattleEngine) {
+    world.register_system(death::DeathSystem);
+    world.register_system(victory::VictorySystem);
 }

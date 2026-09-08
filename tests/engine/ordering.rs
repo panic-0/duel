@@ -2,11 +2,11 @@
 
 use crate::support::OrderMark;
 use duel::core::{
-    event::{Event, EventType},
+    event::{Event, EventKind},
     operation::{EmitEvent, Operation, OperationError},
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -14,13 +14,13 @@ use std::{cell::RefCell, rc::Rc};
 #[derive(Debug)]
 struct RecordSystem {
     tag: u8,
-    kind: NoticeKind,
+    kind: EventKind,
     priority: Priority,
     triggered: Rc<RefCell<Vec<u8>>>,
 }
 
 impl RecordSystem {
-    fn new(tag: u8, kind: NoticeKind, priority: Priority, triggered: Rc<RefCell<Vec<u8>>>) -> Self {
+    fn new(tag: u8, kind: EventKind, priority: Priority, triggered: Rc<RefCell<Vec<u8>>>) -> Self {
         RecordSystem {
             tag,
             kind,
@@ -31,18 +31,22 @@ impl RecordSystem {
 }
 
 impl System for RecordSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
         vec![(self.kind, self.priority)]
     }
 
-    fn candidates(&self, _fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
-        vec![Subject::Standalone]
+    fn candidates(
+        &self,
+        _fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
+        vec![ReactionTarget::Standalone]
     }
 
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         self.triggered.borrow_mut().push(self.tag);
@@ -53,33 +57,30 @@ impl System for RecordSystem {
 #[test]
 fn higher_priority_listeners_trigger_first() {
     let triggered = Rc::new(RefCell::new(Vec::new()));
-    let mut world = World::new();
-    let kind = NoticeKind::Event(EventType::PlayerAttack);
-    world.add_system(RecordSystem::new(
+    let mut world = BattleEngine::new();
+    let kind = EventKind::PlayerAttack;
+    world.register_system(RecordSystem::new(
         1,
         kind,
         Priority::Default,
         triggered.clone(),
     ));
-    world.add_system(RecordSystem::new(
+    world.register_system(RecordSystem::new(
         2,
         kind,
         Priority::Modify,
         triggered.clone(),
     ));
-    world.add_system(RecordSystem::new(
+    world.register_system(RecordSystem::new(
         3,
         kind,
         Priority::Default,
         triggered.clone(),
     ));
 
-    assert_eq!(
-        world.get_event_registration_count(NoticeKind::Event(EventType::PlayerAttack)),
-        3
-    );
-    assert!(world.validate_registry_consistency());
-    assert_eq!(world.get_registry_stats(), (1, 3, 3));
+    assert_eq!(world.event_registration_count(EventKind::PlayerAttack), 3);
+    assert!(world.validate_registry());
+    assert_eq!(world.registry_stats(), (1, 3, 3));
 
     world
         .execute(EmitEvent(Event::PlayerAttack {
@@ -106,26 +107,26 @@ impl OrderSpy {
 }
 
 impl System for OrderSpy {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::RoundStart), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::RoundStart, Priority::Default)]
     }
-    fn candidates(&self, _fact: &Fact<'_>, query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, _fact: &EventEnvelope<'_>, query: &Query<'_>) -> Vec<ReactionTarget> {
         query
-            .instances::<OrderMark>()
+            .components::<OrderMark>()
             .iter()
-            .map(|(id, _, _)| Subject::Instance(*id))
+            .map(|(id, _, _)| ReactionTarget::Instance(*id))
             .collect()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        subject: ReactionTarget,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
-        let Subject::Instance(id) = subject else {
+        let ReactionTarget::Instance(id) = subject else {
             return Ok(vec![]);
         };
-        let mark = query.data::<OrderMark>(id).unwrap().0;
+        let mark = query.component::<OrderMark>(id).unwrap().0;
         self.log.borrow_mut().push((self.tag, mark));
         Ok(vec![])
     }
@@ -133,12 +134,12 @@ impl System for OrderSpy {
 
 #[test]
 fn unified_candidate_order_interleaves_systems_by_instance_creation_order() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let log = Rc::new(RefCell::new(Vec::new()));
-    world.add_system(OrderSpy::new(1, log.clone()));
-    world.add_system(OrderSpy::new(2, log.clone()));
+    world.register_system(OrderSpy::new(1, log.clone()));
+    world.register_system(OrderSpy::new(2, log.clone()));
     for mark in 1..=3u8 {
-        world.add_data(None, OrderMark(mark));
+        world.attach_component(None, OrderMark(mark));
     }
 
     world

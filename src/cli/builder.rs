@@ -1,13 +1,13 @@
-use duel::core::{player::Player, world::World, PlayerId};
+use duel::core::{engine::BattleEngine, player::Player, PlayerId};
 
 pub(super) struct GameBuilder {
-    world: World,
+    world: BattleEngine,
 }
 
 impl GameBuilder {
     pub fn new() -> Self {
         Self {
-            world: World::new(),
+            world: BattleEngine::new(),
         }
     }
 
@@ -17,7 +17,7 @@ impl GameBuilder {
         (self, player_id)
     }
 
-    pub fn build(self) -> World {
+    pub fn build(self) -> BattleEngine {
         self.world
     }
 }

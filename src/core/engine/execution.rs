@@ -1,8 +1,8 @@
 //! 根操作、子操作工作栈及失败状态传播。
 
-use super::World;
+use super::BattleEngine;
 use crate::core::operation::{
-    ErasedOperation, ExecutionContext, Operation, OperationError, OperationOutcome, OperationResult,
+    ActionContext, ErasedOperation, Operation, OperationError, OperationOutcome, OperationResult,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -10,7 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// 只有“操作发布通知 → System 响应 → 再发布通知”的递归路径受它约束。
 const MAX_REACTION_DEPTH: usize = 256;
 
-impl World {
+impl BattleEngine {
     // —— 根入口与执行 ——
 
     /// 运行一个根 Operation。正式终局后的新根请求被无副作用拒绝，
@@ -55,9 +55,11 @@ impl World {
                     break;
                 }
                 let result = {
-                    let mut context = ExecutionContext::new(self);
+                    let mut context = ActionContext::new(self);
                     let result = catch_unwind(AssertUnwindSafe(|| op.execute_erased(&mut context)))
-                        .map_err(|_| OperationError::Failed("Operation panic，World 已停止".into()))
+                        .map_err(|_| {
+                            OperationError::Failed("Operation panic，BattleEngine 已停止".into())
+                        })
                         .and_then(|value| value);
                     let children = context.take_children();
                     drop(context);
@@ -102,7 +104,7 @@ impl World {
         result
     }
 
-    /// 世界已记录失败时返回该错误；受控入口在执行任何新变化前检查。
+    /// 引擎已记录失败时返回该错误；受控入口在执行任何新变化前检查。
     pub(crate) fn check_operation_failed(&self) -> Result<(), OperationError> {
         match &self.operation_error {
             Some(error) => Err(error.clone()),

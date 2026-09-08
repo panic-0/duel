@@ -1,10 +1,10 @@
-use duel::core::{log::LogEntry, state::GameState, world::MAX_ROUNDS, PlayerId};
+use duel::core::{engine::MAX_ROUNDS, log::LogEntry, state::BattleState, PlayerId};
 
-pub(super) fn print_log(world: &GameState, entry: &LogEntry) {
+pub(super) fn print_log(world: &BattleState, entry: &LogEntry) {
     use colored::Colorize;
     let name = |id: PlayerId| {
         world
-            .get_player(id)
+            .player(id)
             .map(|p| p.name().to_string())
             .unwrap_or_default()
     };

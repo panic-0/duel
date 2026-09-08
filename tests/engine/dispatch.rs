@@ -2,15 +2,15 @@
 
 use crate::support::{checkpoint, op_system, CheckpointCounter};
 use duel::core::{
-    buff_data::DestructionReason,
-    event::{Event, EventType},
+    component::DestructionReason,
+    event::{Event, EventKind},
     operation::{
-        completed, completed_with, EmitEvent, ExecutionContext, Operation, OperationError,
+        completed, completed_with, ActionContext, EmitEvent, Operation, OperationError,
         OperationOutcome, RemoveDataOperation,
     },
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    BuffId, PlayerId, World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine, ComponentId, PlayerId,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -30,32 +30,29 @@ fn removed_instance_no_longer_receives_events() {
     }
 
     impl System for MarkerSpy {
-        fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-            vec![(
-                NoticeKind::Event(EventType::PlayerAttack),
-                Priority::Default,
-            )]
+        fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+            vec![(EventKind::PlayerAttack, Priority::Default)]
         }
 
         fn candidates(
             &self,
-            _fact: &Fact<'_>,
+            _fact: &EventEnvelope<'_>,
             query: &duel::core::query::Query<'_>,
-        ) -> Vec<Subject> {
+        ) -> Vec<ReactionTarget> {
             query
-                .instances::<Marker>()
+                .components::<Marker>()
                 .iter()
-                .map(|(id, _, _)| Subject::Instance(*id))
+                .map(|(id, _, _)| ReactionTarget::Instance(*id))
                 .collect()
         }
 
         fn respond(
             &self,
-            _fact: &Fact<'_>,
-            subject: Subject,
+            _fact: &EventEnvelope<'_>,
+            subject: ReactionTarget,
             _query: &duel::core::query::Query<'_>,
         ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
-            if let Subject::Instance(id) = subject {
+            if let ReactionTarget::Instance(id) = subject {
                 self.seen.borrow_mut().push(id);
             }
             Ok(vec![])
@@ -63,9 +60,9 @@ fn removed_instance_no_longer_receives_events() {
     }
 
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let mut world = World::new();
-    world.add_system(MarkerSpy { seen: seen.clone() });
-    let marker = world.add_data(None, Marker);
+    let mut world = BattleEngine::new();
+    world.register_system(MarkerSpy { seen: seen.clone() });
+    let marker = world.attach_component(None, Marker);
 
     let attack = || Event::PlayerAttack {
         source_id: 0,
@@ -81,7 +78,7 @@ fn removed_instance_no_longer_receives_events() {
             reason: DestructionReason::Explicit,
         })
         .expect("移除应成功");
-    assert!(world.validate_registry_consistency());
+    assert!(world.validate_registry());
 
     world.execute(EmitEvent(attack())).expect("事件应正常分发");
     assert_eq!(*seen.borrow(), vec![marker], "已销毁实例不应再参与事件响应");
@@ -93,7 +90,7 @@ struct PublishThenRead(Rc<Cell<usize>>);
 impl Operation for PublishThenRead {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         ctx.publish(checkpoint())?;
         completed_with(self.0.get())
@@ -101,10 +98,10 @@ impl Operation for PublishThenRead {
 }
 
 #[test]
-fn n1a_publish_finishes_reactions_before_returning_to_operation() {
-    let mut world = World::new();
+fn publish_finishes_reactions_before_returning_to_operation() {
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    world.add_system(CheckpointCounter(count.clone()));
+    world.register_system(CheckpointCounter(count.clone()));
     let (_, value) = world.execute(PublishThenRead(count)).expect("根操作");
     let observed = *value
         .expect("应读取到计数")
@@ -113,7 +110,7 @@ fn n1a_publish_finishes_reactions_before_returning_to_operation() {
     assert_eq!(observed, 1, "publish 在反应运行之前就返回了");
 }
 
-/// 空数据实例标记，用于验证 C3A 的新增实例语义。
+/// 空数据实例标记，用于验证 新增实例加入后续事件的语义。
 #[derive(Debug)]
 struct MarkerData;
 
@@ -122,20 +119,24 @@ struct MarkerData;
 struct MarkerCounter(Rc<Cell<usize>>);
 
 impl System for MarkerCounter {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Default)]
     }
-    fn candidates(&self, _fact: &Fact<'_>, query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        _fact: &EventEnvelope<'_>,
+        query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         query
-            .instances::<MarkerData>()
+            .components::<MarkerData>()
             .iter()
-            .map(|(id, _, _)| Subject::Instance(*id))
+            .map(|(id, _, _)| ReactionTarget::Instance(*id))
             .collect()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         self.0.set(self.0.get() + 1);
@@ -149,43 +150,47 @@ struct PublishThenAdd;
 impl Operation for PublishThenAdd {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         ctx.publish(checkpoint())?;
-        ctx.add_data(None, MarkerData)?;
+        ctx.attach_component(None, MarkerData)?;
         completed()
     }
 }
 
 #[test]
-fn n1a_and_c3a_later_added_instance_does_not_receive_previously_published_event() {
-    let mut world = World::new();
+fn and_c3a_later_added_instance_does_not_receive_previously_published_event() {
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    world.add_system(MarkerCounter(count.clone()));
+    world.register_system(MarkerCounter(count.clone()));
     world.execute(PublishThenAdd).expect("根操作");
     assert_eq!(count.get(), 0, "新增数据实例收到了在它创建之前发布的通知");
 }
 
 #[derive(Debug)]
 struct RemovePeer {
-    peer: BuffId,
+    peer: ComponentId,
 }
 
 impl System for RemovePeer {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Modify)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Modify)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Checkpoint { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
 
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(RemoveDataOperation {
@@ -196,12 +201,12 @@ impl System for RemovePeer {
 }
 
 #[test]
-fn audit_instance_removed_mid_dispatch_is_skipped_in_current_event() {
-    let mut world = World::new();
+fn instance_removed_mid_dispatch_is_skipped_in_current_event() {
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    let marker = world.add_data(None, MarkerData);
-    world.add_system(MarkerCounter(count.clone()));
-    world.add_system(RemovePeer { peer: marker });
+    let marker = world.attach_component(None, MarkerData);
+    world.register_system(MarkerCounter(count.clone()));
+    world.register_system(RemovePeer { peer: marker });
 
     world.execute(EmitEvent(checkpoint())).expect("事件");
     assert_eq!(count.get(), 0, "轮到之前被移除的候选应被跳过");
@@ -214,20 +219,20 @@ struct LateMarker;
 struct LateMarkerSpy(Rc<Cell<usize>>);
 
 impl System for LateMarkerSpy {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::RoundEnd), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::RoundEnd, Priority::Default)]
     }
-    fn candidates(&self, _fact: &Fact<'_>, query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, _fact: &EventEnvelope<'_>, query: &Query<'_>) -> Vec<ReactionTarget> {
         query
-            .instances::<LateMarker>()
+            .components::<LateMarker>()
             .iter()
-            .map(|(id, _, _)| Subject::Instance(*id))
+            .map(|(id, _, _)| ReactionTarget::Instance(*id))
             .collect()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         self.0.set(self.0.get() + 1);
@@ -241,10 +246,10 @@ struct AddMarkerThenPublishChild;
 impl Operation for AddMarkerThenPublishChild {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         ctx.try_publish(Event::RoundStart { round: 1 })?;
-        ctx.add_data(None, LateMarker)?;
+        ctx.attach_component(None, LateMarker)?;
         // 子事件：新增的实例应立即有资格参与。
         ctx.try_publish(Event::RoundEnd { round: 1 })?;
         completed()
@@ -252,10 +257,10 @@ impl Operation for AddMarkerThenPublishChild {
 }
 
 #[test]
-fn instance_added_between_notices_skips_the_earlier_and_joins_the_later() {
-    let mut world = World::new();
+fn instance_added_between_events_skips_the_earlier_and_joins_the_later() {
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    world.add_system(LateMarkerSpy(count.clone()));
+    world.register_system(LateMarkerSpy(count.clone()));
 
     world
         .execute(AddMarkerThenPublishChild)
@@ -270,10 +275,10 @@ fn instance_added_between_notices_skips_the_earlier_and_joins_the_later() {
 
 #[test]
 fn event_reactions_settle_depth_first_before_their_siblings() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let trace = Rc::new(RefCell::new(Vec::new()));
     let sink = trace.clone();
-    op_system(&mut world, &[EventType::RoundStart, EventType::RoundEnd], {
+    op_system(&mut world, &[EventKind::RoundStart, EventKind::RoundEnd], {
         let sink = sink.clone();
         move |fact, _| {
             match fact.event() {

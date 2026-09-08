@@ -3,14 +3,14 @@
 //! 基础生命周期机制只负责在死亡提交中同步销毁 owner 依赖。
 
 use super::super::{
-    event::{Event, EventType},
+    event::{Event, EventKind},
     log::LogEntry,
     operation::{
-        completed, skipped, ChangeSet, ExecutionContext, Operation, OperationError,
-        OperationOutcome, SubmissionResult,
+        completed, skipped, ActionContext, ChangeSet, Operation, OperationError, OperationOutcome,
+        SubmissionResult,
     },
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
+    system::{EventEnvelope, Priority, ReactionTarget, System},
     PlayerId,
 };
 
@@ -31,16 +31,16 @@ pub struct DeathOperation {
 impl DeathOperation {
     fn settle(
         player_id: PlayerId,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         // 死亡前通知：救回等响应完整结束后，再按当前状态重新判断。
         context.try_publish(Event::BeforePlayerDeath(player_id))?;
-        if context.state().get_player(player_id).is_none() {
+        if context.state().player(player_id).is_none() {
             return completed();
         }
         if context
             .state()
-            .get_player(player_id)
+            .player(player_id)
             .is_some_and(|p| p.hp() != 0)
         {
             return completed();
@@ -60,7 +60,7 @@ impl DeathOperation {
 impl Operation for DeathOperation {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let player_id = self.player_id;
         // 同一次死亡只进入一次死亡前流程；嵌套的重复请求直接跳过。
@@ -71,7 +71,7 @@ impl Operation for DeathOperation {
         {
             return skipped();
         }
-        let Some(player) = context.state().get_player(player_id) else {
+        let Some(player) = context.state().player(player_id) else {
             return skipped();
         };
         if player.hp() != 0 {
@@ -96,21 +96,21 @@ impl Operation for DeathOperation {
 pub(crate) struct DeathSystem;
 
 impl System for DeathSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::HpChanged), Priority::Final)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::HpChanged, Priority::Final)]
     }
 
-    fn candidates(&self, fact: &Fact<'_>, query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, query: &Query<'_>) -> Vec<ReactionTarget> {
         if fact.event().is_none() {
             return Vec::new();
         }
         if query
             .state()
-            .get_players()
+            .players()
             .values()
             .any(|player| player.hp() == 0)
         {
-            vec![Subject::Standalone]
+            vec![ReactionTarget::Standalone]
         } else {
             Vec::new()
         }
@@ -118,13 +118,13 @@ impl System for DeathSystem {
 
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(query
             .state()
-            .get_players()
+            .players()
             .iter()
             .filter(|(_, player)| player.hp() == 0)
             .map(|(&id, _)| Box::new(DeathOperation { player_id: id }) as Box<dyn Operation>)

@@ -7,7 +7,7 @@ mod context;
 pub use builtins::{AddPlayerOperation, EmitEvent, RemoveDataOperation, RemovePlayerOperation};
 pub(crate) use changes::HpRequest;
 pub use changes::{ChangeSet, DestroyedInfo, HpChange, SubmissionResult};
-pub use context::{ExecutionContext, OperationContext};
+pub use context::ActionContext;
 
 use std::{any::Any, fmt::Debug};
 
@@ -45,14 +45,14 @@ pub fn skipped() -> Result<OperationOutcome, OperationError> {
 pub trait Operation: Debug + 'static {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError>;
 }
 
 impl Operation for Box<dyn Operation> {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         (*self).execute(context)
     }
@@ -61,14 +61,14 @@ impl Operation for Box<dyn Operation> {
 pub(crate) trait ErasedOperation: Debug {
     fn execute_erased(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError>;
 }
 
 impl<T: Operation> ErasedOperation for T {
     fn execute_erased(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         self.execute(context)
     }

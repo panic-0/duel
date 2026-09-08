@@ -2,14 +2,12 @@
 
 use crate::support::{checkpoint, CheckpointCounter, Count, OrderMark, RuntimeFailureOn};
 use duel::core::{
-    event::{Event, EventType},
-    operation::{
-        completed, EmitEvent, ExecutionContext, Operation, OperationError, OperationOutcome,
-    },
+    event::{Event, EventKind},
+    operation::{completed, ActionContext, EmitEvent, Operation, OperationError, OperationOutcome},
     player::Player,
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    PlayerId, World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine, PlayerId,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -18,21 +16,21 @@ use std::{
 
 /// 对指定事件一律失败响应的 System。
 #[derive(Debug)]
-struct ResourceFailureOn(EventType);
+struct ResourceFailureOn(EventKind);
 
 impl System for ResourceFailureOn {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(self.0), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(self.0, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         fact.event()
-            .map(|_| vec![Subject::Standalone])
+            .map(|_| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Err(OperationError::Failed("451cdb1 回归测试的故意失败".into()))
@@ -53,7 +51,7 @@ struct ProbeResource {
 impl Operation for TryResourceWrites {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let _ = ctx.publish(Event::RoundStart { round: 1 });
         let set = ctx.set_resource(ProbeResource { value: 42 });
@@ -70,7 +68,7 @@ impl Operation for TryResourceWrites {
 #[test]
 fn resource_writes_are_rejected_after_failure_and_allowed_when_healthy() {
     // 健康路径：资源写入可用。
-    let mut healthy = World::new();
+    let mut healthy = BattleEngine::new();
     let writes = Rc::new(RefCell::new(Vec::new()));
     healthy
         .execute(TryResourceWrites {
@@ -92,8 +90,8 @@ fn resource_writes_are_rejected_after_failure_and_allowed_when_healthy() {
     );
 
     // 失败路径：全部拒绝。
-    let mut world = World::new();
-    world.add_system(ResourceFailureOn(EventType::RoundStart));
+    let mut world = BattleEngine::new();
+    world.register_system(ResourceFailureOn(EventKind::RoundStart));
     let failed = Rc::new(RefCell::new(Vec::new()));
     let result = world.execute(TryResourceWrites {
         results: failed.clone(),
@@ -121,7 +119,7 @@ struct FailOperation;
 impl Operation for FailOperation {
     fn execute(
         self: Box<Self>,
-        _: &mut ExecutionContext<'_>,
+        _: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         Err(OperationError::Failed("回归测试的故意失败".into()))
     }
@@ -131,18 +129,22 @@ impl Operation for FailOperation {
 struct FailingSystem;
 
 impl System for FailingSystem {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::Checkpoint), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::Checkpoint, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::Checkpoint { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(FailOperation)])
@@ -151,10 +153,10 @@ impl System for FailingSystem {
 
 #[test]
 fn inline_operation_error_reaches_root_and_stops_later_listeners() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    world.add_system(FailingSystem);
-    world.add_system(CheckpointCounter(count.clone()));
+    world.register_system(FailingSystem);
+    world.register_system(CheckpointCounter(count.clone()));
     let result = world.execute(EmitEvent(checkpoint()));
     assert!(result.is_err(), "嵌套 Err 被静默忽略");
     assert_eq!(count.get(), 0, "操作失败后更晚的监听者仍然运行了");
@@ -166,7 +168,7 @@ struct Fail;
 impl Operation for Fail {
     fn execute(
         self: Box<Self>,
-        _: &mut ExecutionContext<'_>,
+        _: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         Err(OperationError::Failed("回归测试的故意失败".into()))
     }
@@ -174,21 +176,25 @@ impl Operation for Fail {
 
 /// 对指定事件一律失败响应的 System。
 #[derive(Debug)]
-struct OperationFailureOn(EventType);
+struct OperationFailureOn(EventKind);
 
 impl System for OperationFailureOn {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(self.0), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(self.0, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &duel::core::query::Query<'_>) -> Vec<Subject> {
+    fn candidates(
+        &self,
+        fact: &EventEnvelope<'_>,
+        _query: &duel::core::query::Query<'_>,
+    ) -> Vec<ReactionTarget> {
         fact.event()
-            .map(|_| vec![Subject::Standalone])
+            .map(|_| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         _query: &duel::core::query::Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
         Ok(vec![Box::new(Fail)])
@@ -205,7 +211,7 @@ struct ContinueAfterFailedHpChange {
 impl Operation for ContinueAfterFailedHpChange {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let _ = ctx.modify_hp(self.a, -1);
         let _ = ctx.modify_hp(self.b, -1);
@@ -214,23 +220,23 @@ impl Operation for ContinueAfterFailedHpChange {
 }
 
 #[test]
-fn failed_hp_reaction_must_not_allow_later_world_mutation() {
-    let mut world = World::new();
+fn failed_hp_reaction_must_not_allow_later_engine_mutation() {
+    let mut world = BattleEngine::new();
     let a = world.add_player(Player::new("A".into(), 10, 0));
     let b = world.add_player(Player::new("B".into(), 10, 0));
-    world.add_system(OperationFailureOn(EventType::HpChanged));
+    world.register_system(OperationFailureOn(EventKind::HpChanged));
 
     let result = world.execute(ContinueAfterFailedHpChange { a, b });
 
     assert!(result.is_err());
     assert!(world.is_operation_failed());
     assert_eq!(
-        world.get_player(a).unwrap().hp(),
+        world.player(a).unwrap().hp(),
         9,
         "不要求回滚第一次已提交的变化"
     );
     assert_eq!(
-        world.get_player(b).unwrap().hp(),
+        world.player(b).unwrap().hp(),
         10,
         "错误发生后不应继续提交第二次变化"
     );
@@ -242,7 +248,7 @@ struct ContinueChildAfterPublishError(Rc<Cell<usize>>);
 impl Operation for ContinueChildAfterPublishError {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         // 故意不传播发布错误：即使调用方忽略，失败也必须阻止后续子操作。
         let _ = ctx.publish(Event::RoundStart { round: 1 });
@@ -252,10 +258,10 @@ impl Operation for ContinueChildAfterPublishError {
 }
 
 #[test]
-fn a_child_must_not_start_when_the_world_already_records_failure() {
-    let mut world = World::new();
+fn a_child_must_not_start_when_the_engine_already_records_failure() {
+    let mut world = BattleEngine::new();
     let count = Rc::new(Cell::new(0));
-    world.add_system(OperationFailureOn(EventType::RoundStart));
+    world.register_system(OperationFailureOn(EventKind::RoundStart));
 
     let result = world.execute(ContinueChildAfterPublishError(count.clone()));
 
@@ -272,15 +278,15 @@ struct AttemptWritesAfterFailure {
 impl Operation for AttemptWritesAfterFailure {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         // publish 的错误记录到世界，不传播；后续受控入口应全部拒绝。
         let _ = ctx.publish(Event::RoundStart { round: 1 });
-        let add = ctx.add_data(None, OrderMark(1));
+        let add = ctx.attach_component(None, OrderMark(1));
         let remove = ctx.remove_player(0);
         let publish = ctx.try_publish(Event::RoundEnd { round: 1 });
         let mut results = self.results.borrow_mut();
-        results.push(format!("add_data err={}", add.is_err()));
+        results.push(format!("attach_component err={}", add.is_err()));
         results.push(format!("remove_player err={}", remove.is_err()));
         results.push(format!("publish err={}", publish.is_err()));
         // 本操作自身返回成功：根调用仍应返回已记录的错误。
@@ -289,10 +295,10 @@ impl Operation for AttemptWritesAfterFailure {
 }
 
 #[test]
-fn failure_rejects_every_subsequent_runtime_mutation_and_notice() {
-    let mut world = World::new();
+fn failure_rejects_every_subsequent_runtime_mutation_and_event() {
+    let mut world = BattleEngine::new();
     let a = world.add_player(Player::new("A".into(), 10, 0));
-    world.add_system(RuntimeFailureOn(EventType::RoundStart));
+    world.register_system(RuntimeFailureOn(EventKind::RoundStart));
 
     let results = Rc::new(RefCell::new(Vec::new()));
     let result = world.execute(AttemptWritesAfterFailure {
@@ -303,12 +309,12 @@ fn failure_rejects_every_subsequent_runtime_mutation_and_notice() {
     assert_eq!(
         *results.borrow(),
         vec![
-            "add_data err=true".to_string(),
+            "attach_component err=true".to_string(),
             "remove_player err=true".to_string(),
             "publish err=true".to_string(),
         ],
         "失败后所有运行期受控入口都应拒绝执行"
     );
-    assert!(world.query().instances::<OrderMark>().is_empty());
-    assert!(world.get_player(a).is_some(), "拒绝的移除不得产生状态变化");
+    assert!(world.query().components::<OrderMark>().is_empty());
+    assert!(world.player(a).is_some(), "拒绝的移除不得产生状态变化");
 }

@@ -1,3 +1,5 @@
+//! 战斗参与者的基础属性与生命状态。
+
 #[derive(Debug, Clone)]
 pub struct Player {
     name: String,
@@ -47,7 +49,7 @@ impl Player {
 
     // 带校验的写入
     /// 仅限对局开始前的初始配置；运行期的生命变化必须走受控提交
-    /// （ExecutionContext::modify_hp / submit_damage），否则不会产生基础事件。
+    /// （ActionContext::modify_hp / submit_damage），否则不会产生基础事件。
     pub(crate) fn set_hp(&mut self, hp: u64) {
         self.hp = hp.min(self.max_hp);
     }

@@ -1,4 +1,4 @@
-//! 世界状态、初始化装配与查询入口。
+//! 战斗引擎状态、初始化装配与查询入口。
 //! 执行调度、通知分发和关联提交分别由私有子模块实现。
 
 mod dispatch;
@@ -6,14 +6,15 @@ mod execution;
 mod submission;
 
 use crate::core::{
-    buff_data::{BuffData, BuffRecord},
+    component::{Component, ComponentRecord},
+    event::EventKind,
     log::{LogEntry, Logger},
     operation::OperationError,
     player::Player,
     query::Query,
-    state::GameState,
-    system::{NoticeKind, Priority, System},
-    BuffId, PlayerId,
+    state::BattleState,
+    system::{Priority, System},
+    ComponentId, PlayerId,
 };
 use std::{
     any::{Any, TypeId},
@@ -25,7 +26,7 @@ pub const MAX_ROUNDS: u32 = 10000;
 
 /// 对局结束的判定结果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GameResult {
+pub enum BattleResult {
     /// 剩最后一名玩家
     LastStanding,
     /// 达到回合上限，平局
@@ -38,7 +39,7 @@ struct SystemSlot {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct NoticeRoute {
+struct DispatchEnvelopeRoute {
     priority: Priority,
     system_order: usize,
     system_id: usize,
@@ -47,15 +48,15 @@ struct NoticeRoute {
 /// 执行器：管理基础状态、数据实例与扩展资源，统一运行 System 响应与
 /// Operation，负责候选排序、受控关联提交和事实通知。不实现伤害或死亡玩法。
 #[derive(Debug)]
-pub struct World {
-    state: GameState,
-    records: BTreeMap<BuffId, BuffRecord>,
-    buff_id_counter: BuffId,
+pub struct BattleEngine {
+    state: BattleState,
+    records: BTreeMap<ComponentId, ComponentRecord>,
+    component_id_counter: ComponentId,
     systems: Vec<SystemSlot>,
     system_id_counter: usize,
     /// 数据实例创建与 System 注册共用的单调顺序来源。
-    subject_seq: usize,
-    notice_index: HashMap<NoticeKind, Vec<NoticeRoute>>,
+    reaction_sequence: usize,
+    envelope_index: HashMap<EventKind, Vec<DispatchEnvelopeRoute>>,
     /// 中性扩展存储：按类型存放业务资源（规则注册表、进行中标记等），
     /// 基础层不解释其内容。
     resources: HashMap<TypeId, Box<dyn Any>>,
@@ -64,22 +65,22 @@ pub struct World {
     operation_depth: usize,
 }
 
-impl Default for World {
+impl Default for BattleEngine {
     fn default() -> Self {
-        World::new()
+        BattleEngine::new()
     }
 }
 
-impl World {
+impl BattleEngine {
     pub fn new() -> Self {
-        World {
-            state: GameState::new(),
+        BattleEngine {
+            state: BattleState::new(),
             records: BTreeMap::new(),
-            buff_id_counter: 0,
+            component_id_counter: 0,
             systems: Vec::new(),
             system_id_counter: 0,
-            subject_seq: 0,
-            notice_index: HashMap::new(),
+            reaction_sequence: 0,
+            envelope_index: HashMap::new(),
             resources: HashMap::new(),
             end: false,
             operation_error: None,
@@ -95,14 +96,14 @@ impl World {
 
     /// 注册一个 System。System 的注册与数据实例生命周期独立：
     /// 删除一份护盾实例不会删除护盾 System，同一个 System 也不要重复注册。
-    pub fn add_system(&mut self, system: impl System + 'static) {
+    pub fn register_system(&mut self, system: impl System + 'static) {
         let system_id = self.system_id_counter;
         self.system_id_counter += 1;
         // 独立响应的主体顺序 = System 注册顺序，与数据实例创建共用同一单调来源。
         let order = self.next_subject();
         for (kind, priority) in system.subscriptions() {
-            let routes = self.notice_index.entry(kind).or_default();
-            routes.push(NoticeRoute {
+            let routes = self.envelope_index.entry(kind).or_default();
+            routes.push(DispatchEnvelopeRoute {
                 priority,
                 system_order: order,
                 system_id,
@@ -114,14 +115,18 @@ impl World {
         });
     }
 
-    /// 注册一份数据实例，返回稳定身份（BuffId）。
-    pub fn add_data<D: BuffData + 'static>(&mut self, owner: Option<PlayerId>, data: D) -> BuffId {
-        let id = self.buff_id_counter;
-        self.buff_id_counter += 1;
+    /// 注册一份数据实例，返回稳定身份（ComponentId）。
+    pub fn attach_component<D: Component + 'static>(
+        &mut self,
+        owner: Option<PlayerId>,
+        data: D,
+    ) -> ComponentId {
+        let id = self.component_id_counter;
+        self.component_id_counter += 1;
         let subject_order = self.next_subject();
         self.records.insert(
             id,
-            BuffRecord {
+            ComponentRecord {
                 owner,
                 subject_order,
                 data: Box::new(data),
@@ -131,7 +136,7 @@ impl World {
     }
 
     /// 按身份读取数据实例。
-    pub fn get_data<T: BuffData>(&self, id: BuffId) -> Option<&T> {
+    pub fn component<T: Component>(&self, id: ComponentId) -> Option<&T> {
         let record = self.records.get(&id)?;
         record.data.downcast_ref::<T>()
     }
@@ -146,12 +151,12 @@ impl World {
 
     // —— 只读访问 ——
 
-    pub fn get_players(&self) -> &BTreeMap<PlayerId, Player> {
-        self.state.get_players()
+    pub fn players(&self) -> &BTreeMap<PlayerId, Player> {
+        self.state.players()
     }
 
-    pub fn get_player(&self, id: PlayerId) -> Option<&Player> {
-        self.state.get_player(id)
+    pub fn player(&self, id: PlayerId) -> Option<&Player> {
+        self.state.player(id)
     }
 
     /// 仅限初始化配置；运行期生命变化必须走受控提交。
@@ -165,7 +170,7 @@ impl World {
             .is_some()
     }
 
-    pub(crate) fn state_view(&self) -> &GameState {
+    pub(crate) fn state_view(&self) -> &BattleState {
         &self.state
     }
 
@@ -222,12 +227,12 @@ impl World {
         self.state.remove_player(id)
     }
 
-    pub(crate) fn end_game(&mut self, result: GameResult) -> Result<(), OperationError> {
+    pub(crate) fn end_game(&mut self, result: BattleResult) -> Result<(), OperationError> {
         self.check_operation_failed()?;
         if self.end {
             return Ok(());
         }
-        if matches!(result, GameResult::Draw) {
+        if matches!(result, BattleResult::Draw) {
             self.log(LogEntry::Draw);
         }
         self.end = true;
@@ -235,8 +240,8 @@ impl World {
     }
 
     fn next_subject(&mut self) -> usize {
-        self.subject_seq += 1;
-        self.subject_seq
+        self.reaction_sequence += 1;
+        self.reaction_sequence
     }
 
     /// 从共同单调顺序源取下一个独立响应主体顺序。
@@ -247,21 +252,25 @@ impl World {
 
     // —— 注册表诊断 ——
 
-    pub fn get_event_registration_count(&self, kind: NoticeKind) -> usize {
-        self.notice_index
+    pub fn event_registration_count(&self, kind: EventKind) -> usize {
+        self.envelope_index
             .get(&kind)
             .map(|routes| routes.len())
             .unwrap_or(0)
     }
 
-    pub fn get_registry_stats(&self) -> (usize, usize, usize) {
-        let total_kinds = self.notice_index.len();
-        let total_routes: usize = self.notice_index.values().map(|routes| routes.len()).sum();
+    pub fn registry_stats(&self) -> (usize, usize, usize) {
+        let total_kinds = self.envelope_index.len();
+        let total_routes: usize = self
+            .envelope_index
+            .values()
+            .map(|routes| routes.len())
+            .sum();
         (total_kinds, total_routes, self.systems.len())
     }
 
-    pub fn validate_registry_consistency(&self) -> bool {
-        self.notice_index
+    pub fn validate_registry(&self) -> bool {
+        self.envelope_index
             .values()
             .flatten()
             .all(|route| route.system_id < self.systems.len())

@@ -2,7 +2,7 @@
 
 use super::super::{
     operation::{
-        completed_with, skipped, ChangeSet, ExecutionContext, Operation, OperationError,
+        completed_with, skipped, ActionContext, ChangeSet, Operation, OperationError,
         OperationOutcome, OperationResult,
     },
     PlayerId,
@@ -23,7 +23,7 @@ impl Heal {
 impl Operation for Heal {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let changes = ChangeSet::new().heal(self.target_id, self.amount);
         let result = context.submit(changes)?;
@@ -61,7 +61,7 @@ impl HpModifier {
 impl Operation for HpModifier {
     fn execute(
         self: Box<Self>,
-        context: &mut ExecutionContext<'_>,
+        context: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         let Some(change) = context.modify_hp(self.target_id, self.modifier)? else {
             return Ok((OperationResult::Skipped, None));

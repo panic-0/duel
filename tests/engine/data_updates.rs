@@ -1,15 +1,13 @@
 //! 数据更新的稳定身份、关联提交与类型边界。
 
 use duel::core::{
-    business::damage::{register_damage_rule, DamageContext, DamageRule},
-    event::{Event, EventType},
-    operation::{
-        completed, ChangeSet, ExecutionContext, Operation, OperationError, OperationOutcome,
-    },
+    business::damage::{register_damage_rule, DamageDraft, DamageRule},
+    event::{Event, EventKind},
+    operation::{completed, ActionContext, ChangeSet, Operation, OperationError, OperationOutcome},
     player::Player,
     query::Query,
-    system::{Fact, NoticeKind, Priority, Subject, System},
-    BuffId, PlayerId, World,
+    system::{EventEnvelope, Priority, ReactionTarget, System},
+    BattleEngine, ComponentId, PlayerId,
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -24,26 +22,26 @@ struct CapacityShield {
 struct CapacityShieldRule;
 
 impl DamageRule for CapacityShieldRule {
-    fn candidates(&self, context: &DamageContext, query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, context: &DamageDraft, query: &Query<'_>) -> Vec<ReactionTarget> {
         query
-            .instances::<CapacityShield>()
+            .components::<CapacityShield>()
             .iter()
             .filter(|(_, _, data)| data.target_id == context.target_id)
-            .map(|(id, _, _)| Subject::Instance(*id))
+            .map(|(id, _, _)| ReactionTarget::Instance(*id))
             .collect()
     }
-    fn modify(&self, context: &mut DamageContext, subject: Subject, query: &Query<'_>) {
-        let Subject::Instance(id) = subject else {
+    fn modify(&self, context: &mut DamageDraft, subject: ReactionTarget, query: &Query<'_>) {
+        let ReactionTarget::Instance(id) = subject else {
             return;
         };
-        let Some(data) = query.data::<CapacityShield>(id) else {
+        let Some(data) = query.component::<CapacityShield>(id) else {
             return;
         };
         // 吸收伤害并声明容量扣减：与最终伤害一起进入受控关联提交。
         let absorbed = data.capacity.min(context.amount);
         context.reduce_to(context.amount - absorbed);
         if absorbed > 0 {
-            context.update_buff(
+            context.update_component(
                 id,
                 Box::new(CapacityShield {
                     target_id: data.target_id,
@@ -58,16 +56,16 @@ impl DamageRule for CapacityShieldRule {
 #[derive(Debug)]
 struct AbsorbAndUpdate {
     target: PlayerId,
-    shield: BuffId,
+    shield: ComponentId,
     new_capacity: u64,
 }
 
 impl Operation for AbsorbAndUpdate {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        let changes = ChangeSet::new().damage(self.target, 3).update_data(
+        let changes = ChangeSet::new().damage(self.target, 3).update_component(
             self.shield,
             Box::new(CapacityShield {
                 target_id: self.target,
@@ -82,26 +80,26 @@ impl Operation for AbsorbAndUpdate {
 /// 生命变化响应：读取护盾当前容量。
 #[derive(Debug)]
 struct CapacityObserver {
-    shield: BuffId,
+    shield: ComponentId,
     observed: Rc<Cell<u64>>,
 }
 
 impl System for CapacityObserver {
-    fn subscriptions(&self) -> Vec<(NoticeKind, Priority)> {
-        vec![(NoticeKind::Event(EventType::HpChanged), Priority::Default)]
+    fn subscriptions(&self) -> Vec<(EventKind, Priority)> {
+        vec![(EventKind::HpChanged, Priority::Default)]
     }
-    fn candidates(&self, fact: &Fact<'_>, _query: &Query<'_>) -> Vec<Subject> {
+    fn candidates(&self, fact: &EventEnvelope<'_>, _query: &Query<'_>) -> Vec<ReactionTarget> {
         matches!(fact.event(), Some(Event::HpChanged { .. }))
-            .then(|| vec![Subject::Standalone])
+            .then(|| vec![ReactionTarget::Standalone])
             .unwrap_or_default()
     }
     fn respond(
         &self,
-        _fact: &Fact<'_>,
-        _subject: Subject,
+        _fact: &EventEnvelope<'_>,
+        _subject: ReactionTarget,
         query: &Query<'_>,
     ) -> Result<Vec<Box<dyn Operation>>, OperationError> {
-        if let Some(data) = query.data::<CapacityShield>(self.shield) {
+        if let Some(data) = query.component::<CapacityShield>(self.shield) {
             self.observed.set(data.capacity);
         }
         Ok(vec![])
@@ -110,10 +108,10 @@ impl System for CapacityObserver {
 
 #[test]
 fn controlled_update_keeps_identity_and_joins_associated_submission() {
-    let mut world = World::new();
+    let mut world = BattleEngine::new();
     let b = world.add_player(Player::new("B".into(), 20, 0));
     register_damage_rule(&mut world, Priority::Modify, CapacityShieldRule);
-    let shield = world.add_data(
+    let shield = world.attach_component(
         Some(b),
         CapacityShield {
             target_id: b,
@@ -123,7 +121,7 @@ fn controlled_update_keeps_identity_and_joins_associated_submission() {
 
     // 关联提交：扣血与容量更新对所有响应同时可见。
     let observed = Rc::new(Cell::new(0u64));
-    world.add_system(CapacityObserver {
+    world.register_system(CapacityObserver {
         shield,
         observed: observed.clone(),
     });
@@ -136,10 +134,10 @@ fn controlled_update_keeps_identity_and_joins_associated_submission() {
         .expect("关联提交应正常结算");
 
     assert_eq!(observed.get(), 7, "生命响应可见时，容量更新必须已经完成");
-    let data = world.get_data::<CapacityShield>(shield).expect("实例仍在");
+    let data = world.component::<CapacityShield>(shield).expect("实例仍在");
     assert_eq!(data.capacity, 7, "更新保留原实例身份");
     assert_eq!(
-        world.query().instances::<CapacityShield>().len(),
+        world.query().components::<CapacityShield>().len(),
         1,
         "更新不得销毁重建实例"
     );
@@ -153,14 +151,14 @@ fn controlled_update_keeps_identity_and_joins_associated_submission() {
         })
         .expect("便捷更新应正常结算");
     assert_eq!(
-        world.get_data::<CapacityShield>(shield).unwrap().capacity,
+        world.component::<CapacityShield>(shield).unwrap().capacity,
         4
     );
 }
 
 #[derive(Debug)]
 struct ConvenienceUpdate {
-    shield: BuffId,
+    shield: ComponentId,
     target: PlayerId,
     capacity: u64,
 }
@@ -168,9 +166,9 @@ struct ConvenienceUpdate {
 impl Operation for ConvenienceUpdate {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.update_data(
+        ctx.update_component(
             self.shield,
             CapacityShield {
                 target_id: self.target,
@@ -189,23 +187,23 @@ struct MarkerB;
 
 #[derive(Debug)]
 struct CrossTypeUpdate {
-    id: BuffId,
+    id: ComponentId,
 }
 
 impl Operation for CrossTypeUpdate {
     fn execute(
         self: Box<Self>,
-        ctx: &mut ExecutionContext<'_>,
+        ctx: &mut ActionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.update_data(self.id, MarkerB)?;
+        ctx.update_component(self.id, MarkerB)?;
         completed()
     }
 }
 
 #[test]
-fn update_data_rejects_cross_type_replacement() {
-    let mut world = World::new();
-    let id = world.add_data(None, MarkerA);
+fn update_component_rejects_cross_type_replacement() {
+    let mut world = BattleEngine::new();
+    let id = world.attach_component(None, MarkerA);
 
     let result = world.execute(CrossTypeUpdate { id });
 
@@ -214,7 +212,7 @@ fn update_data_rejects_cross_type_replacement() {
         "跨类型替换应在写入前明确拒绝"
     );
     assert!(
-        world.get_data::<MarkerA>(id).is_some(),
+        world.component::<MarkerA>(id).is_some(),
         "被拒绝的更新不得改动原实例"
     );
 }
