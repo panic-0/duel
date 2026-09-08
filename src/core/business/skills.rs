@@ -13,12 +13,18 @@ pub trait Ability: std::fmt::Debug {
 /// 不随可用性过滤而漂移，避免列表变化导致漏执行或重复。
 #[derive(Debug)]
 pub struct Abilities {
+    /// 业务上的技能持有者；记录 owner 只表示生命周期依赖。
+    holder: PlayerId,
     abilities: Vec<Box<dyn Ability>>,
 }
 
 impl Abilities {
-    pub fn new(abilities: Vec<Box<dyn Ability>>) -> Self {
-        Abilities { abilities }
+    pub fn new(holder: PlayerId, abilities: Vec<Box<dyn Ability>>) -> Self {
+        Abilities { holder, abilities }
+    }
+
+    pub fn holder(&self) -> PlayerId {
+        self.holder
     }
 
     /// 按当前状态收集此刻可用的正常行动。

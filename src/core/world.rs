@@ -239,7 +239,8 @@ impl World {
         self.resources.insert(TypeId::of::<T>(), Box::new(value));
     }
 
-    pub(crate) fn resource<T: Any>(&self) -> Option<&T> {
+    /// 只读访问一个中性扩展资源。失败后仍允许读取与诊断。
+    pub fn resource<T: Any>(&self) -> Option<&T> {
         self.resources
             .get(&TypeId::of::<T>())
             .and_then(|value| value.downcast_ref::<T>())
@@ -300,6 +301,11 @@ impl World {
             let mut stack: Vec<Box<dyn ErasedOperation>> = vec![operation];
             let mut root_result = None;
             while let Some(op) = stack.pop() {
+                // 正式终局后不再启动已排队但尚未开始的玩法操作；
+                // 必要的资源释放与运行时收尾由各操作自身保证。
+                if self.end {
+                    break;
+                }
                 let result = {
                     let mut context = ExecutionContext::new(self);
                     let result = catch_unwind(AssertUnwindSafe(|| op.execute_erased(&mut context)))
@@ -376,7 +382,15 @@ impl World {
             hp,
             remove_player,
             destroy,
+            updates,
+            hp_conflict,
         } = changes;
+        // 多次生命声明属于调用方错误：写入前拒绝，不静默丢弃请求。
+        if hp_conflict {
+            return Err(OperationError::Invalid(
+                "ChangeSet 只允许声明一项生命变化".into(),
+            ));
+        }
         let mut result = SubmissionResult::default();
         let mut staged: Vec<StagedDestruction> = Vec::new();
 
@@ -424,6 +438,13 @@ impl World {
                     reason,
                     data: record.data,
                 });
+            }
+        }
+        // 数据更新按声明顺序应用，保留原实例身份；不存在的实例跳过。
+        for (id, data) in updates {
+            if let Some(record) = self.records.get_mut(&id) {
+                record.data = data;
+                result.updated.push(id);
             }
         }
         staged.sort_by_key(|item| item.buff_id);
@@ -622,6 +643,12 @@ impl World {
     fn next_subject(&mut self) -> usize {
         self.subject_seq += 1;
         self.subject_seq
+    }
+
+    /// 从共同单调顺序源取下一个独立响应主体顺序。
+    /// 供业务注册表登记独立候选身份，避免与实例创建顺序使用不同计数空间。
+    pub(crate) fn next_subject_order(&mut self) -> usize {
+        self.next_subject()
     }
 
     // —— 注册表诊断 ——

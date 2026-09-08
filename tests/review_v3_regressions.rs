@@ -444,7 +444,7 @@ impl Operation for CounterThenHeal {
 }
 
 #[test]
-fn d4_produced_operations_survive_source_destruction() {
+fn operation_combination_does_not_depend_on_source_survival() {
     let mut world = World::new();
     install_default_rules(&mut world);
     let owner = world.add_player(Player::new("Owner".into(), 10, 0));
@@ -600,7 +600,7 @@ impl Operation for AttemptWritesAfterFailure {
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
         // publish 的错误记录到世界，不传播；后续受控入口应全部拒绝。
-        ctx.publish(Event::RoundStart { round: 1 });
+        let _ = ctx.publish(Event::RoundStart { round: 1 });
         let add = ctx.add_data(None, OrderMark(1));
         let remove = ctx.remove_player(0);
         let publish = ctx.try_publish(Event::RoundEnd { round: 1 });
@@ -786,7 +786,7 @@ impl Operation for AddMarkerThenPublishChild {
 }
 
 #[test]
-fn instance_added_mid_flow_skips_current_notice_but_joins_child_notice() {
+fn instance_added_between_notices_skips_the_earlier_and_joins_the_later() {
     let mut world = World::new();
     let count = Rc::new(Cell::new(0));
     world.add_system(LateMarkerSpy(count.clone()));

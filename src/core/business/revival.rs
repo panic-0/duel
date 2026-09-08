@@ -6,7 +6,8 @@ use super::super::{
     event::{Event, EventType},
     log::LogEntry,
     operation::{
-        completed, skipped, ExecutionContext, Operation, OperationError, OperationOutcome,
+        completed, skipped, ChangeSet, ExecutionContext, Operation, OperationError,
+        OperationOutcome,
     },
     query::Query,
     system::{Fact, NoticeKind, Priority, Subject, System},
@@ -14,13 +15,15 @@ use super::super::{
     BuffId, PlayerId,
 };
 
-/// 救回数据实例：`owner` 随玩家销毁；消费时机由救回操作决定。
+/// 救回数据实例：`player_id` 是业务上的服务对象（被救回的角色）；
+/// 记录 owner 只表示生命周期依赖（随谁销毁），与救回目标无关。
 #[derive(Debug)]
 pub struct RevivalData {
     pub player_id: PlayerId,
 }
 
-/// 响应死亡前通知的救回 System：为每个属于该玩家的救回实例产生候选。
+/// 响应死亡前通知的救回 System：为每个服务于该玩家的救回实例产生候选。
+/// 匹配使用业务字段 `player_id`；记录上的 owner 只决定随谁销毁。
 #[derive(Debug)]
 pub struct RevivalSystem;
 
@@ -39,7 +42,7 @@ impl System for RevivalSystem {
         query
             .instances::<RevivalData>()
             .iter()
-            .filter(|(_, owner, _)| *owner == Some(*player_id))
+            .filter(|(_, _, data)| data.player_id == *player_id)
             .map(|(id, _, _)| Subject::Instance(*id))
             .collect()
     }
@@ -63,7 +66,8 @@ impl System for RevivalSystem {
     }
 }
 
-/// 一次救回：先成功消费救回机会，再恢复生命；机会已失效就不免费治疗。
+/// 一次救回：消费救回机会与恢复生命在同一次关联提交中完成，
+/// 任何响应都不会看到“机会已消耗但生命仍为零”的半次提交。
 #[derive(Debug)]
 pub struct RevivalOperation {
     source_id: PlayerId,
@@ -86,11 +90,21 @@ impl Operation for RevivalOperation {
         if amount == 0 {
             return skipped();
         }
-        if !context.remove_data(self.buff_id, DestructionReason::Consumed)? {
+        // 写入前验证：救回机会必须仍然存在，否则不免费治疗。
+        if context.data::<RevivalData>(self.buff_id).is_none() {
+            return skipped();
+        }
+        // 联合提交：消费机会（Consumed）与恢复生命一起写入，之后才开放通知。
+        let changes = ChangeSet::new()
+            .hp(player_id, amount as i64)
+            .destroy(self.buff_id, DestructionReason::Consumed);
+        let result = context.submit(changes)?;
+        let revived =
+            result.destroyed.iter().any(|d| d.buff_id == self.buff_id) && result.hp.is_some();
+        if !revived {
             return skipped();
         }
         context.log(LogEntry::Revival { player_id });
-        context.modify_hp(player_id, amount as i64)?;
         completed()
     }
 }

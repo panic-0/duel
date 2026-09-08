@@ -61,6 +61,9 @@ pub trait DamageRule: std::fmt::Debug {
 #[derive(Debug)]
 struct DamageRuleEntry {
     priority: Priority,
+    /// 独立候选的主体顺序，来自与数据实例创建相同的共同单调顺序源，
+    /// 可与实例的创建顺序直接比较。
+    order: usize,
     rule: Box<dyn DamageRule>,
 }
 
@@ -72,20 +75,26 @@ pub struct DamageRules {
 }
 
 impl DamageRules {
-    fn insert(&mut self, priority: Priority, rule: Box<dyn DamageRule>) {
-        self.entries.push(DamageRuleEntry { priority, rule });
+    fn insert(&mut self, priority: Priority, order: usize, rule: Box<dyn DamageRule>) {
+        self.entries.push(DamageRuleEntry {
+            priority,
+            order,
+            rule,
+        });
     }
 }
 
 /// 注册一条伤害修改规则。同一规则注册一次即可，
 /// 它会在每次伤害的参数窗口中按统一候选顺序为适用的实例生效。
+/// 独立候选的主体顺序从世界的共同顺序源取得，不使用注册表下标冒充。
 pub fn register_damage_rule(
     world: &mut World,
     priority: Priority,
     rule: impl DamageRule + 'static,
 ) {
+    let order = world.next_subject_order();
     let registry = world.resource_mut_or_insert_with(DamageRules::default);
-    registry.insert(priority, Box::new(rule));
+    registry.insert(priority, order, Box::new(rule));
 }
 
 #[derive(Debug)]
@@ -106,6 +115,11 @@ impl Operation for Damage {
         mut self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
+        // 写入前验证：目标不存在则伤害不成立，
+        // 不得进入参数窗口，更不得提交以伤害成功为前提的资源消耗。
+        if context.state().get_player(self.context.target_id).is_none() {
+            return skipped();
+        }
         // 参数修改窗口：候选 =（Priority, 响应主体稳定顺序, 规则注册顺序），
         // 前一个修改对后一个可见。
         let registry = context.resource::<DamageRules>();
@@ -117,7 +131,7 @@ impl Operation for Damage {
                     for subject in entry.rule.candidates(&self.context, &query) {
                         let subject_order = match subject {
                             Subject::Instance(id) => query.subject_order(id).unwrap_or(0),
-                            Subject::Standalone => rule_order,
+                            Subject::Standalone => entry.order,
                         };
                         candidates.push((entry.priority, subject_order, rule_order, subject));
                     }

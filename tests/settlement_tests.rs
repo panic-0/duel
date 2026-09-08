@@ -96,7 +96,7 @@ fn fatal_attack_completes_notifications_and_retaliation_before_ending() {
     install_default_rules(&mut world);
     let a = world.add_player(Player::new("A".into(), 10, 10));
     let b = world.add_player(Player::new("B".into(), 10, 1));
-    world.add_data(Some(a), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(a), Abilities::new(a, vec![Box::new(Attack)]));
     let trace = trace_events(&mut world);
     let victim = b;
     let avenger = a;
@@ -159,7 +159,7 @@ fn ordinary_attack_finishes_before_after_turn() {
     install_default_rules(&mut world);
     let a = world.add_player(Player::new("A".into(), 10, 1));
     let b = world.add_player(Player::new("B".into(), 10, 1));
-    world.add_data(Some(a), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(a), Abilities::new(a, vec![Box::new(Attack)]));
     let trace = trace_events(&mut world);
     world.run().expect("对局应正常结束");
     // Operation 路径的事件顺序是确定的：回合通知完成后才执行正常行动，
@@ -307,7 +307,7 @@ fn death_summon_finishes_before_last_survivor_check() {
     install_default_rules(&mut world);
     world.add_player(Player::new("攻击者".into(), 10, 10));
     let target = world.add_player(Player::new("召唤者".into(), 10, 1));
-    world.add_data(Some(0), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(0), Abilities::new(0, vec![Box::new(Attack)]));
     op_system(&mut world, &[EventType::AfterPlayerDeath], |_, _| {
         vec![
             Box::new(AddPlayerOperation(Player::new("召唤物".into(), 10, 1))) as Box<dyn Operation>,

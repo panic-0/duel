@@ -46,7 +46,7 @@ fn normal_action_cursor_does_not_skip_attack_after_conditional_heal_disappears()
     world.get_player_mut(a).unwrap().set_hp(9); // 仅用于测试初始化。
     world.add_data(
         Some(a),
-        Abilities::new(vec![Box::new(HealIfWounded), Box::new(Attack)]),
+        Abilities::new(a, vec![Box::new(HealIfWounded), Box::new(Attack)]),
     );
 
     world
@@ -159,7 +159,8 @@ impl Operation for ContinueChildAfterPublishError {
         self: Box<Self>,
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.publish(Event::RoundStart { round: 1 });
+        // 故意不传播发布错误：即使调用方忽略，失败也必须阻止后续子操作。
+        let _ = ctx.publish(Event::RoundStart { round: 1 });
         ctx.execute(Count(self.0.clone()))?;
         completed()
     }

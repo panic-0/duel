@@ -65,7 +65,7 @@ impl Operation for DeathOperation {
         let player_id = self.player_id;
         // 同一次死亡只进入一次死亡前流程；嵌套的重复请求直接跳过。
         if context
-            .resource_mut_or_default::<DeathGuard>()
+            .resource_mut_or_default::<DeathGuard>()?
             .pending
             .contains(&player_id)
         {
@@ -78,14 +78,15 @@ impl Operation for DeathOperation {
             return skipped();
         }
         context
-            .resource_mut_or_default::<DeathGuard>()
+            .resource_mut_or_default::<DeathGuard>()?
             .pending
             .push(player_id);
         let outcome = Self::settle(player_id, context);
-        context
-            .resource_mut_or_default::<DeathGuard>()
-            .pending
-            .retain(|&pending| pending != player_id);
+        // 进行中标记必须在错误路径上同样释放：
+        // 这是必要的运行时收尾，使用失败后的受限清理路径，不承载新的玩法变化。
+        if let Some(guard) = context.resource_mut_ignoring_failure::<DeathGuard>() {
+            guard.pending.retain(|&pending| pending != player_id);
+        }
         outcome
     }
 }

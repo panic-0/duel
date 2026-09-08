@@ -145,8 +145,9 @@ impl TurnOperation {
         let mut chosen: Option<((BuffId, usize), Box<dyn Operation>)> = None;
         {
             let query = context.query();
-            for (id, owner, abilities) in query.instances::<Abilities>() {
-                if owner != Some(self.player_id) {
+            // 按业务持有者字段匹配技能集合；记录 owner 只决定生命周期。
+            for (id, _, abilities) in query.instances::<Abilities>() {
+                if abilities.holder() != self.player_id {
                     continue;
                 }
                 for (slot, action) in abilities.normal_actions(self.player_id, query.state()) {

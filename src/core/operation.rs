@@ -96,12 +96,10 @@ impl<'a> ExecutionContext<'a> {
         self.world.query()
     }
 
-    /// 发布事件并等待其全部响应完成。错误记入世界后本调用继续返回；
-    /// 后续受控入口（提交、子操作）会拒绝执行，根调用最终返回该错误。
-    pub fn publish(&mut self, event: Event) {
-        if let Err(error) = self.try_publish(event) {
-            self.world.record_operation_error(error);
-        }
+    /// 发布事件并等待其全部响应完成。错误记入世界后由本调用返回；
+    /// 后续受控入口（提交、子操作）也会拒绝执行，根调用最终返回该错误。
+    pub fn publish(&mut self, event: Event) -> Result<(), OperationError> {
+        self.try_publish(event)
     }
 
     /// 发布事件并等待其全部响应完成；事件是不可变事实，没有读回值。
@@ -182,12 +180,25 @@ impl<'a> ExecutionContext<'a> {
         Ok(self.world.add_player(player))
     }
 
-    pub fn remove_player(
-        &mut self,
-        id: PlayerId,
-    ) -> Result<Option<super::player::Player>, OperationError> {
+    /// 移除一名角色。与 ChangeSet 的角色移除走同一条生命周期路径：
+    /// owner 依赖的数据实例随同次提交销毁，并产生相应销毁事实。
+    pub fn remove_player(&mut self, id: PlayerId) -> Result<bool, OperationError> {
         self.world.check_operation_failed()?;
-        Ok(self.world.take_player(id))
+        let result = self.world.submit(ChangeSet::new().remove_player(id))?;
+        Ok(result.player_removed)
+    }
+
+    /// 受控更新一份数据实例：保留原身份与候选顺序，就地替换数据。
+    /// 更新在关联提交的写入阶段完成，不产生销毁事实。
+    pub fn update_data(
+        &mut self,
+        id: BuffId,
+        data: impl BuffData + 'static,
+    ) -> Result<bool, OperationError> {
+        self.world.check_operation_failed()?;
+        let changes = ChangeSet::new().update_data(id, Box::new(data));
+        let result = self.world.submit(changes)?;
+        Ok(result.updated.contains(&id))
     }
 
     /// 按身份读取数据实例。
@@ -196,23 +207,35 @@ impl<'a> ExecutionContext<'a> {
     }
 
     /// 写入（替换）一个中性扩展资源；业务类型与解释逻辑留在业务模块。
-    pub fn set_resource<T: Any>(&mut self, value: T) {
+    /// 世界已记录失败时拒绝写入。
+    pub fn set_resource<T: Any>(&mut self, value: T) -> Result<(), OperationError> {
+        self.world.check_operation_failed()?;
         self.world.set_resource(value);
+        Ok(())
     }
 
-    /// 可变访问一个中性扩展资源。
-    pub fn resource_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.world.resource_mut::<T>()
+    /// 可变访问一个中性扩展资源。世界已记录失败时拒绝写入。
+    pub fn resource_mut<T: Any>(&mut self) -> Result<Option<&mut T>, OperationError> {
+        self.world.check_operation_failed()?;
+        Ok(self.world.resource_mut::<T>())
     }
 
-    /// 只读访问一个中性扩展资源。
+    /// 只读访问一个中性扩展资源。失败后仍允许读取与诊断。
     pub fn resource<T: Any>(&self) -> Option<&T> {
         self.world.resource::<T>()
     }
 
     /// 可变访问一个中性扩展资源，不存在时以默认值插入。
-    pub fn resource_mut_or_default<T: Any + Default>(&mut self) -> &mut T {
-        self.world.resource_mut_or_insert_with(T::default)
+    /// 世界已记录失败时拒绝写入。
+    pub fn resource_mut_or_default<T: Any + Default>(&mut self) -> Result<&mut T, OperationError> {
+        self.world.check_operation_failed()?;
+        Ok(self.world.resource_mut_or_insert_with(T::default))
+    }
+
+    /// 失败后的受限清理路径：仅供“进行中标记必须释放”一类必要收尾使用，
+    /// 不承载任何新的玩法状态变化。
+    pub(crate) fn resource_mut_ignoring_failure<T: Any>(&mut self) -> Option<&mut T> {
+        self.world.resource_mut::<T>()
     }
 
     pub fn spawn<O: Operation>(&mut self, operation: O) {
@@ -240,8 +263,11 @@ pub struct HpChange {
 #[derive(Debug, Default)]
 pub struct ChangeSet {
     pub(crate) hp: Option<HpRequest>,
+    /// 是否重复声明了生命变化；提交时明确拒绝，不静默覆盖。
+    pub(crate) hp_conflict: bool,
     pub(crate) remove_player: Option<PlayerId>,
     pub(crate) destroy: Vec<(BuffId, DestructionReason)>,
+    pub(crate) updates: Vec<(BuffId, Box<dyn Any>)>,
 }
 
 /// 无符号的生命变化请求；伤害与治疗分别走有界无符号计算。
@@ -256,9 +282,17 @@ impl ChangeSet {
         Self::default()
     }
 
+    fn set_hp_request(&mut self, request: HpRequest) {
+        // 一次提交至多一项生命变化：重复声明在提交时明确拒绝，不静默覆盖。
+        if self.hp.is_some() {
+            self.hp_conflict = true;
+        }
+        self.hp = Some(request);
+    }
+
     /// 生命变化（正数治疗、负数伤害）。
     pub fn hp(mut self, target_id: PlayerId, modifier: i64) -> Self {
-        self.hp = Some(if modifier < 0 {
+        self.set_hp_request(if modifier < 0 {
             HpRequest::Damage(target_id, modifier.unsigned_abs())
         } else {
             HpRequest::Heal(target_id, modifier as u64)
@@ -268,13 +302,13 @@ impl ChangeSet {
 
     /// 直接以无符号数值声明伤害，避免大数符号转换。
     pub fn damage(mut self, target_id: PlayerId, amount: u64) -> Self {
-        self.hp = Some(HpRequest::Damage(target_id, amount));
+        self.set_hp_request(HpRequest::Damage(target_id, amount));
         self
     }
 
     /// 直接以无符号数值声明治疗。
     pub fn heal(mut self, target_id: PlayerId, amount: u64) -> Self {
-        self.hp = Some(HpRequest::Heal(target_id, amount));
+        self.set_hp_request(HpRequest::Heal(target_id, amount));
         self
     }
 
@@ -287,6 +321,13 @@ impl ChangeSet {
     /// 销毁一份数据实例并产生销毁事实。
     pub fn destroy(mut self, id: BuffId, reason: DestructionReason) -> Self {
         self.destroy.push((id, reason));
+        self
+    }
+
+    /// 就地更新一份数据实例：保留原身份与候选顺序，不产生销毁事实。
+    /// 多次更新同一实例时按声明顺序应用（最后一次生效）。
+    pub fn update_data(mut self, id: BuffId, data: Box<dyn Any>) -> Self {
+        self.updates.push((id, data));
         self
     }
 }
@@ -307,6 +348,8 @@ pub struct SubmissionResult {
     pub player_removed: bool,
     /// 本组提交销毁的全部实例，按 BuffId 升序。
     pub destroyed: Vec<DestroyedInfo>,
+    /// 本组提交就地更新的实例身份，按声明顺序。
+    pub updated: Vec<BuffId>,
 }
 
 #[derive(Debug)]
@@ -317,7 +360,7 @@ impl Operation for EmitEvent {
         self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        context.publish(self.0);
+        context.publish(self.0)?;
         completed()
     }
 }
@@ -343,7 +386,7 @@ impl Operation for RemovePlayerOperation {
         self: Box<Self>,
         context: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        if context.remove_player(self.0)?.is_some() {
+        if context.remove_player(self.0)? {
             completed()
         } else {
             skipped()

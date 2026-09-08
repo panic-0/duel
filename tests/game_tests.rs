@@ -80,10 +80,10 @@ fn full_game_runs_to_expected_outcome() {
     let mut world = World::new();
     let p1 = world.add_player(Player::new("Player1".to_string(), 15, 10));
     let p2 = world.add_player(Player::new("Player2".to_string(), 28, 8));
-    world.add_data(Some(p1), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p1), Abilities::new(p1, vec![Box::new(Attack)]));
     register_revival_system(&mut world);
     add_revival(&mut world, p1);
-    world.add_data(Some(p2), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p2), Abilities::new(p2, vec![Box::new(Attack)]));
     register_damage_reduction_rule(&mut world);
     add_damage_reduction(&mut world, p2, p2, 0.2);
     install_default_rules(&mut world);
@@ -105,10 +105,10 @@ fn revival_triggers_exactly_once() {
 
     let p1 = world.add_player(Player::new("Hero".to_string(), 10, 2));
     let p2 = world.add_player(Player::new("Boss".to_string(), 100, 10));
-    world.add_data(Some(p1), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p1), Abilities::new(p1, vec![Box::new(Attack)]));
     register_revival_system(&mut world);
     add_revival(&mut world, p1);
-    world.add_data(Some(p2), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p2), Abilities::new(p2, vec![Box::new(Attack)]));
     install_default_rules(&mut world);
 
     world.run().expect("对局应正常结束");
@@ -249,10 +249,10 @@ fn round_limit_stops_unwinnable_game() {
 
     let p1 = world.add_player(Player::new("A".to_string(), 10, 2));
     let p2 = world.add_player(Player::new("B".to_string(), 10, 2));
-    world.add_data(Some(p1), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p1), Abilities::new(p1, vec![Box::new(Attack)]));
     register_damage_reduction_rule(&mut world);
     add_damage_reduction(&mut world, p1, p1, 1.0);
-    world.add_data(Some(p2), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(p2), Abilities::new(p2, vec![Box::new(Attack)]));
     add_damage_reduction(&mut world, p2, p2, 1.0);
     install_default_rules(&mut world);
 
@@ -301,7 +301,7 @@ fn three_player_game_ends_with_single_survivor() {
         world.add_player(Player::new(name.to_string(), 30, 10));
     }
     for id in 0..3 {
-        world.add_data(Some(id), Abilities::new(vec![Box::new(Attack)]));
+        world.add_data(Some(id), Abilities::new(id, vec![Box::new(Attack)]));
     }
     install_default_rules(&mut world);
 
@@ -317,8 +317,8 @@ fn custom_round_limit_ends_game_early() {
     let mut world = World::new();
     world.add_player(Player::new("A".to_string(), 100, 5));
     world.add_player(Player::new("B".to_string(), 100, 5));
-    world.add_data(Some(0), Abilities::new(vec![Box::new(Attack)]));
-    world.add_data(Some(1), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(Some(0), Abilities::new(0, vec![Box::new(Attack)]));
+    world.add_data(Some(1), Abilities::new(1, vec![Box::new(Attack)]));
 
     world.run_with_max_rounds(2).expect("对局应正常结束");
 
@@ -368,7 +368,7 @@ fn dead_player_never_gets_another_turn() {
         turns: turns.clone(),
     });
     for id in [a, b, c] {
-        world.add_data(Some(id), Abilities::new(vec![Box::new(Attack)]));
+        world.add_data(Some(id), Abilities::new(id, vec![Box::new(Attack)]));
     }
     install_default_rules(&mut world);
 

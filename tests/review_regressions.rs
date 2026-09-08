@@ -71,7 +71,7 @@ impl Operation for PublishThenRead {
         self: Box<Self>,
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.publish(checkpoint());
+        ctx.publish(checkpoint())?;
         completed_with(self.0.get())
     }
 }
@@ -185,7 +185,7 @@ impl Operation for PublishThenAdd {
         self: Box<Self>,
         ctx: &mut ExecutionContext<'_>,
     ) -> Result<OperationOutcome, OperationError> {
-        ctx.publish(checkpoint());
+        ctx.publish(checkpoint())?;
         ctx.add_data(None, MarkerData)?;
         completed()
     }
@@ -348,10 +348,13 @@ fn c4a_checkpoint_between_normal_abilities_stops_second_ability() {
     let count = Rc::new(Cell::new(0));
     world.add_data(
         Some(a),
-        Abilities::new(vec![
-            Box::new(CountingAbility(count.clone())),
-            Box::new(CountingAbility(count.clone())),
-        ]),
+        Abilities::new(
+            a,
+            vec![
+                Box::new(CountingAbility(count.clone())),
+                Box::new(CountingAbility(count.clone())),
+            ],
+        ),
     );
     world.add_system(EndAtFirstActionCheckpoint);
     world.run_with_max_rounds(1).expect("对局应正常结束");

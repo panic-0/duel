@@ -102,8 +102,14 @@ fn main() {
     let mut world = builder.build();
 
     // 技能集合是数据实例，owner 随玩家销毁。
-    world.add_data(Some(player1_id), Abilities::new(vec![Box::new(Attack)]));
-    world.add_data(Some(player2_id), Abilities::new(vec![Box::new(Attack)]));
+    world.add_data(
+        Some(player1_id),
+        Abilities::new(player1_id, vec![Box::new(Attack)]),
+    );
+    world.add_data(
+        Some(player2_id),
+        Abilities::new(player2_id, vec![Box::new(Attack)]),
+    );
 
     // 救回：System 注册一次，实例按玩家添加。
     revival::register_revival_system(&mut world);
